@@ -173,3 +173,8 @@ details.dia[open] > summary { margin-bottom: 10px; }
 details.dia .cartao { border-color: var(--borda); }
 .linha > :first-child { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .linha > :last-child { flex-shrink: 0; }
+
+svg.grafico .linha-planejado { fill: none; stroke: var(--serie-entrada); stroke-width: 2; stroke-dasharray: 5 4; }
+svg.grafico .linha-realizado { fill: none; stroke: var(--serie-saida); stroke-width: 2; }
+svg.grafico .valor-final { fill: var(--texto); font-weight: 600; }
+.rotulo-acao { width: 100%; }

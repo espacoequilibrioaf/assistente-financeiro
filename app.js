@@ -602,6 +602,22 @@ function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, no
 
   const acoes = el('div', { class: 'acoes' });
   const erro = el('p', { class: 'erro', role: 'alert' });
+  if (podeEditar && l.status === 'previsto' && !ehTransf) {
+    const estrangeira = l.moeda && l.moeda !== 'BRL' && l.cotacao;
+    const novo = el('input', { inputmode: 'decimal', 'aria-label': 'Nova previsão',
+      value: estrangeira ? String(l.valor_original).replace('.', ',') : (l.valor_centavos / 100).toFixed(2).replace('.', ',') });
+    acoes.append(el('form', { class: 'confirmar', onsubmit: async (e) => {
+      e.preventDefault();
+      const v = lerNumero(novo.value);
+      if (!v) { erro.textContent = 'Valor inválido. Para tirar o gasto, use “Zerar”.'; return; }
+      const centavos = Math.round(v * (estrangeira ? Number(l.cotacao) : 1) * 100);
+      const dados = { valor_centavos: centavos, valor_previsto_centavos: centavos };
+      if (estrangeira) dados.valor_original = v;
+      const { error } = await supabase.from('lancamentos').update(dados).eq('id', l.id);
+      if (error) { erro.textContent = mensagemErro(error); return; }
+      aoMudar();
+    } }, el('span', { class: 'discreto pequeno-texto rotulo-acao' }, `Nova previsão (${estrangeira ? l.moeda : 'R$'})`), novo, el('button', { type: 'submit', class: 'pequeno secundario' }, 'Salvar previsão')));
+  }
   if (podeEditar && (l.status === 'previsto' || l.status === 'pendente_confirmacao')) {
     const real = el('input', { inputmode: 'decimal', placeholder: 'Valor real', value: (l.valor_centavos / 100).toFixed(2).replace('.', ',') });
     const conta = el('select', {}, contas.map((c) => el('option', { value: c.id, selected: c.id === l.conta_id }, c.nome)));
@@ -615,17 +631,18 @@ function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, no
         : await supabase.from('lancamentos').update({ status: 'confirmado', valor_centavos: centavos, conta_id: conta.value }).eq('id', l.id);
       if (error) { erro.textContent = mensagemErro(error); return; }
       aoMudar();
-    } }, real, contas.length && !ehTransf ? conta : null, el('button', { type: 'submit', class: 'pequeno' }, l.status === 'previsto' ? 'Confirmar valor real' : 'Aprovar')));
+    } }, el('span', { class: 'discreto pequeno-texto rotulo-acao' }, l.status === 'previsto' ? 'Já pagou? Valor pago em R$ e de onde saiu' : 'Aprovar: valor em R$ e conta'), real, contas.length && !ehTransf ? conta : null, el('button', { type: 'submit', class: 'pequeno' }, l.status === 'previsto' ? 'Confirmar valor real' : 'Aprovar')));
   }
   if (podeEditar) {
     acoes.append(el('button', { class: 'link pequeno', onclick: async () => {
-      if (!confirm('Cancelar este lançamento? Ele sai das contas, mas continua no histórico.')) return;
+      if (!confirm('Zerar este gasto? Ele sai das contas, mas continua no histórico.')) return;
       const { error } = await supabase.from('lancamentos').update({ status: 'cancelado' }).in('id', ids);
       if (error) { erro.textContent = mensagemErro(error); return; }
       aoMudar();
-    } }, 'Cancelar lançamento'));
+    } }, 'Zerar (remover)'));
   }
 
+  const painel = el('div', { class: 'tela escondido' }, acoes);
   return el('li', { class: 'cartao' },
     el('div', { class: 'linha' },
       el('strong', {}, l.descricao || nomeCat[l.categoria_id] || (ehTransf ? 'Transferência' : l.tipo === 'receita' ? 'Receita' : 'Despesa')),
@@ -639,7 +656,9 @@ function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, no
           l.status === 'confirmado' && l.pago_por && nomePessoa[l.pago_por] ? `pago por ${nomePessoa[l.pago_por]}` : null].filter(Boolean).join(' · ')) : null,
     l.observacao ? el('p', { class: 'observacao' }, l.observacao) : null,
     etiquetas.length ? el('div', { class: 'acoes' }, etiquetas) : null,
-    diferenca, acoes, erro,
+    diferenca,
+    acoes.childElementCount ? el('button', { class: 'link pequeno', onclick: (e) => { painel.classList.toggle('escondido'); e.currentTarget.textContent = painel.classList.contains('escondido') ? 'Ajustar ▾' : 'Fechar ▴'; } }, 'Ajustar ▾') : null,
+    painel, erro,
   );
 }
 
@@ -751,6 +770,49 @@ function lerNumero(texto) {
 }
 
 function diasEntre(a, b) { return Math.round((Date.parse(b) - Date.parse(a)) / 864e5); }
+
+function graficoEvolucao(despesas, inicio, fim) {
+  const ativos = despesas.filter((l) => l.status !== 'cancelado');
+  if (!ativos.length) return null;
+  const datas = ativos.map((l) => l.data).sort();
+  const d0 = [datas[0], inicio].filter(Boolean).sort()[0];
+  const d1 = [datas.at(-1), fim].filter(Boolean).sort().at(-1);
+  const total = diasEntre(d0, d1) + 1;
+  const dias = Array.from({ length: total }, (_, i) => new Date(Date.parse(`${d0}T12:00:00`) + i * 864e5).toISOString().slice(0, 10));
+  let acP = 0, acR = 0;
+  const serie = dias.map((d) => {
+    const doDia = ativos.filter((l) => l.data === d);
+    acP += doDia.reduce((a, l) => a + l.valor_centavos, 0);
+    acR += doDia.filter((l) => l.status === 'confirmado').reduce((a, l) => a + l.valor_centavos, 0);
+    return { d, p: acP, r: acR };
+  });
+  const W = 340, H = 190, esq = 4, base = 150, topo = 14;
+  const max = Math.max(1, acP);
+  const X = (i) => esq + (i / Math.max(1, total - 1)) * (W - esq - 8);
+  const Y = (v) => base - (v / max) * (base - topo);
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('class', 'grafico'); svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'Gasto acumulado da viagem: planejado e realizado');
+  const add = (tag, attrs, texto, pai = svg) => { const n = document.createElementNS(ns, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); if (texto) n.textContent = texto; pai.append(n); return n; };
+  add('line', { x1: 0, x2: W, y1: base, y2: base, class: 'eixo' });
+  add('polyline', { points: serie.map((s, i) => `${X(i)},${Y(s.p)}`).join(' '), class: 'linha-planejado' });
+  add('polyline', { points: serie.map((s, i) => `${X(i)},${Y(s.r)}`).join(' '), class: 'linha-realizado' });
+  serie.forEach((s, i) => {
+    const g = add('g', {});
+    add('title', {}, `${dataCurta(s.d)}: planejado até aqui ${reais(s.p)} · gasto ${reais(s.r)}`, g);
+    add('rect', { x: X(i) - (W / total) / 2, y: 0, width: W / total, height: base, fill: 'transparent' }, null, g);
+  });
+  [0, Math.floor((total - 1) / 2), total - 1].forEach((i) => add('text', { x: X(i), y: base + 16, class: 'rotulo', 'text-anchor': i === 0 ? 'start' : i === total - 1 ? 'end' : 'middle' }, dataCurta(dias[i])));
+  add('text', { x: W - 8, y: Y(acP) - 4, class: 'rotulo valor-final', 'text-anchor': 'end' }, reais(acP));
+  const dica = el('p', { class: 'pequeno-texto', role: 'status' }, `Planejado: ${reais(acP)} · Gasto até agora: ${reais(acR)}`);
+  svg.addEventListener('click', (e) => { const t = e.target.closest('g')?.querySelector('title'); if (t) dica.textContent = t.textContent; });
+  return el('div', { class: 'cartao tela' },
+    el('strong', {}, 'Evolução do gasto (acumulado)'),
+    el('div', { class: 'legenda' }, el('span', {}, el('i', { class: 'amostra entrada' }), 'Planejado'), el('span', {}, el('i', { class: 'amostra saida' }), 'Gasto real')),
+    svg, dica,
+  );
+}
 
 function roteiroDiaADia(lancs, item, nomeLocal) {
   const dias = {};
@@ -931,11 +993,11 @@ async function telaProjeto(projetoId) {
   );
 
   // itens do orçamento
-  const usoRubrica = (id) => despesas.filter((l) => l.rubrica_id === id).reduce((a, l) => a + l.valor_centavos, 0);
+  const usoRubrica = (id) => despesas.filter((l) => l.rubrica_id === id && l.status === 'confirmado').reduce((a, l) => a + l.valor_centavos, 0);
   const maiorRub = Math.max(1, ...rubricas.map((r) => Math.max(r.valor_previsto_centavos, usoRubrica(r.id))));
   const blocoRubricas = el('div', { class: 'cartao tela' },
-    el('strong', {}, 'Orçamento por item'),
-    el('div', { class: 'legenda' }, el('span', {}, el('i', { class: 'amostra saida' }), 'Gasto'), el('span', {}, el('i', { class: 'amostra saida previsto' }), 'Orçado')),
+    el('strong', {}, 'Por tipo de gasto: planejado × gasto'),
+    el('div', { class: 'legenda' }, el('span', {}, el('i', { class: 'amostra saida' }), 'Gasto'), el('span', {}, el('i', { class: 'amostra saida previsto' }), 'Falta (planejado)')),
     el('ul', { class: 'barras' }, rubricas.map((r) => {
       const usado = usoRubrica(r.id);
       return el('li', {},
@@ -989,7 +1051,7 @@ async function telaProjeto(projetoId) {
   );
 
   // reserva por localidade
-  const usoLocal = (id) => despesas.filter((l) => l.local_id === id).reduce((a, l) => a + l.valor_centavos, 0);
+  const usoLocal = (id) => despesas.filter((l) => l.local_id === id && l.status === 'confirmado').reduce((a, l) => a + l.valor_centavos, 0);
   const maiorLocal = Math.max(1, ...locais.map((r) => Math.max(r.valor_previsto_centavos, usoLocal(r.id))));
   const blocoLocais = el('div', { class: 'cartao tela' },
     el('strong', {}, 'Reserva por local'),
@@ -1107,19 +1169,22 @@ async function telaProjeto(projetoId) {
     marca(),
     el('a', { class: 'link', href: ehEspacoViagem ? '#/' : `#/espaco/${espacoId}` }, ehEspacoViagem ? '‹ Seus espaços' : `‹ ${espR.data.nome}`),
     el('div', { class: 'linha' }, el('h1', {}, proj.nome), datas && el('span', { class: 'etiqueta' }, datas)),
-    conversorRapido(proj.moedas || []),
     resumo,
-    blocoDinheiro,
+    el('h2', {}, 'Roteiro dia a dia'),
+    el('p', { class: 'discreto pequeno-texto' }, 'Toque num dia para ver os gastos. Em cada gasto, “Ajustar” permite mudar a previsão, confirmar o valor pago ou zerar.'),
+    lancs.length ? roteiroDiaADia(lancs, (l) => itemLancamento(l, { nomeCat, nomeConta, contas: contasPagamento.map((c) => ({ ...c, nome: nomeConta[c.id] })), podeEditar, aoMudar: recarregar, nomePessoa, nomeRubrica, nomeLocal }), nomeLocal)
+      : el('p', { class: 'discreto' }, 'Nenhum gasto ainda.'),
     podeEditar && el('button', { onclick: () => { form.classList.toggle('escondido'); valor.focus(); } }, '+ Gasto da viagem'),
     podeEditar && form,
-    blocoDevidos,
-    blocoLocais,
+    conversorRapido(proj.moedas || []),
+    el('h2', {}, 'Painel da viagem'),
+    graficoEvolucao(despesas, proj.data_inicio, proj.data_fim),
     blocoRubricas,
+    blocoLocais,
+    blocoDevidos,
     blocoPessoas,
-    el('h2', {}, 'Roteiro dia a dia'),
-    lancs.length ? roteiroDiaADia(lancs, (l) => itemLancamento(l, { nomeCat, nomeConta, contas: contasPagamento.map((c) => ({ ...c, nome: nomeConta[c.id] })), podeEditar, aoMudar: recarregar, nomePessoa, nomeRubrica, nomeLocal }), nomeLocal)
-      : el('p', { class: 'discreto' }, 'Nenhum gasto ainda. As reservas já pagas (passagem, hotel) podem entrar aqui também.'),
-    el('p', { class: 'discreto' }, 'Quando a fatura do cartão chegar, use “Confirmar valor real” para acertar o valor em reais com IOF.'),
+    blocoDinheiro,
+    el('p', { class: 'discreto pequeno-texto' }, 'Quando a fatura do cartão chegar, use “Confirmar valor real” para acertar o valor em reais com IOF.'),
     ehEspacoViagem && el('div', { class: 'tela' },
       el('h2', {}, 'Contas da viagem'),
       contas.length ? el('ul', { class: 'lista' }, contas.map((c) => el('li', { class: 'cartao linha' }, el('span', {}, `${c.nome} · ${NOMES_CONTA[c.tipo] || c.tipo}`), el('strong', {}, reais(saldos[c.id])))))
