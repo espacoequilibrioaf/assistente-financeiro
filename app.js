@@ -714,6 +714,42 @@ function lerNumero(texto) {
 
 function diasEntre(a, b) { return Math.round((Date.parse(b) - Date.parse(a)) / 864e5); }
 
+// Conversor rápido: digita na moeda local e vê em reais (ou o contrário)
+function conversorRapido(moedas) {
+  const estrangeiras = moedas.filter((m) => m !== 'BRL');
+  if (!estrangeiras.length) return null;
+  let paraReal = true;
+  const valor = el('input', { inputmode: 'decimal', placeholder: '0', autocomplete: 'off', 'aria-label': 'Valor para converter' });
+  const moeda = el('select', { 'aria-label': 'Moeda' }, estrangeiras.map((m) => el('option', { value: m }, m)));
+  const resultado = el('strong', { class: 'conversao' }, '—');
+  const detalhe = el('p', { class: 'discreto pequeno-texto' });
+  const sentido = el('button', { type: 'button', class: 'secundario pequeno', 'aria-label': 'Inverter a conversão' });
+  const desenhar = async () => {
+    sentido.textContent = paraReal ? `${moeda.value} → R$` : `R$ → ${moeda.value}`;
+    valor.placeholder = paraReal ? `valor em ${moeda.value}` : 'valor em reais';
+    const v = lerNumero(valor.value);
+    const c = await buscarCotacao(moeda.value);
+    if (!c) { resultado.textContent = 'Sem cotação agora'; detalhe.textContent = 'Verifique a internet e tente de novo.'; return; }
+    if (!v) { resultado.textContent = '—'; detalhe.textContent = `1 ${moeda.value} = R$ ${numero(c.valor, 4)} (cotação de ${c.data.split('-').reverse().join('/')})`; return; }
+    if (paraReal) {
+      const r = Math.round(v * c.valor * 100);
+      resultado.textContent = `≈ ${reais(r)}`;
+      detalhe.textContent = `No cartão de crédito brasileiro, com IOF de 3,5%: ≈ ${reais(Math.round(r * 1.035))}. Cotação de ${c.data.split('-').reverse().join('/')}.`;
+    } else {
+      resultado.textContent = `≈ ${numero(v / c.valor)} ${moeda.value}`;
+      detalhe.textContent = `1 ${moeda.value} = R$ ${numero(c.valor, 4)}.`;
+    }
+  };
+  sentido.addEventListener('click', () => { paraReal = !paraReal; desenhar(); valor.focus(); });
+  valor.addEventListener('input', desenhar); moeda.addEventListener('change', desenhar);
+  desenhar();
+  return el('div', { class: 'cartao tela' },
+    el('div', { class: 'linha' }, el('strong', {}, 'Conversor rápido'), sentido),
+    el('div', { class: 'grade-valor' }, valor, moeda),
+    resultado, detalhe,
+  );
+}
+
 function blocoProjetos(espacoId, projetos, podeEditar) {
   const nome = el('input', { required: true, maxlength: '80', placeholder: 'Ex.: Tailândia e Índia 2026' });
   const tipo = el('select', {},
@@ -955,6 +991,7 @@ async function telaProjeto(projetoId) {
     marca(),
     el('a', { class: 'link', href: `#/espaco/${espacoId}` }, `‹ ${espR.data.nome}`),
     el('div', { class: 'linha' }, el('h1', {}, proj.nome), datas && el('span', { class: 'etiqueta' }, datas)),
+    conversorRapido(proj.moedas || []),
     resumo,
     blocoDinheiro,
     podeEditar && el('button', { onclick: () => { form.classList.toggle('escondido'); valor.focus(); } }, '+ Gasto da viagem'),
