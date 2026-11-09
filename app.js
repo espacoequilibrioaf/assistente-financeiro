@@ -10,7 +10,6 @@ const supabase = createClient(CONFIG.supabaseUrl, CONFIG.supabaseKey, {
 const app = document.getElementById('app');
 let promptInstalacao = null;
 let usuario = null;          // { id, nome }
-let categorias = null;       // cache das categorias padrão + do espaço
 const estado = { mes: mesAtual() };
 
 // ---------- utilitários ----------
@@ -205,18 +204,22 @@ async function telaInicio() {
 }
 
 // ---------- espaço ----------
-async function carregarCategorias() {
-  if (categorias) return categorias;
-  const { data, error } = await supabase.from('categorias').select('id, nome, tipo, pai_id, ordem').eq('ativa', true);
+async function carregarCategorias(espacoId) {
+  const { data, error } = await supabase.from('categorias')
+    .select('id, nome, tipo, pai_id, ordem, espaco_id').eq('ativa', true)
+    .or(`espaco_id.is.null,espaco_id.eq.${espacoId}`);
   if (error) throw error;
-  const pais = data.filter((c) => !c.pai_id).sort((a, b) => a.ordem - b.ordem);
-  categorias = [];
+  const lista = [];
+  // primeiro as criadas por vocês neste espaço, depois as padrão
+  data.filter((c) => c.espaco_id && !c.pai_id).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'))
+    .forEach((c) => lista.push({ id: c.id, tipo: c.tipo, rotulo: c.nome }));
+  const pais = data.filter((c) => !c.espaco_id && !c.pai_id).sort((a, b) => a.ordem - b.ordem);
   for (const p of pais) {
-    categorias.push({ id: p.id, tipo: p.tipo, rotulo: p.nome });
+    lista.push({ id: p.id, tipo: p.tipo, rotulo: p.nome });
     data.filter((c) => c.pai_id === p.id).sort((a, b) => a.ordem - b.ordem)
-      .forEach((f) => categorias.push({ id: f.id, tipo: f.tipo, rotulo: `${p.nome} › ${f.nome}` }));
+      .forEach((f) => lista.push({ id: f.id, tipo: f.tipo, rotulo: `${p.nome} › ${f.nome}` }));
   }
-  return categorias;
+  return lista;
 }
 
 async function telaEspaco(espacoId) {
@@ -226,7 +229,7 @@ async function telaEspaco(espacoId) {
     supabase.from('membros_espaco').select('papel').eq('espaco_id', espacoId).eq('usuario_id', usuario.id).single(),
     supabase.from('contas').select('id, nome, tipo, saldo_inicial_centavos').eq('espaco_id', espacoId).eq('ativa', true).order('nome'),
     supabase.from('lancamentos')
-      .select('id, tipo, status, descricao, valor_centavos, valor_previsto_centavos, data, categoria_id, conta_id')
+      .select('id, tipo, status, descricao, observacao, valor_centavos, valor_previsto_centavos, data, categoria_id, conta_id')
       .eq('espaco_id', espacoId).eq('data_competencia', `${mes}-01`).neq('status', 'cancelado')
       .order('data', { ascending: false }).order('criado_em', { ascending: false }),
     supabase.from('lancamentos').select('conta_id, tipo, valor_centavos').eq('espaco_id', espacoId).eq('status', 'confirmado'),
@@ -235,7 +238,7 @@ async function telaEspaco(espacoId) {
   const erro = [espR, papelR, contasR, mesR, saldosR, membrosR].find((r) => r.error);
   if (erro) return telaErro(`Não foi possível abrir este espaço: ${mensagemErro(erro.error)}`);
   let cats;
-  try { cats = await carregarCategorias(); } catch (e) { return telaErro(mensagemErro(e)); }
+  try { cats = await carregarCategorias(espacoId); } catch (e) { return telaErro(mensagemErro(e)); }
 
   const espaco = espR.data; const papel = papelR.data.papel;
   const podeEditar = papel === 'dono' || papel === 'editor';
@@ -307,8 +310,23 @@ async function telaEspaco(espacoId) {
     contas.length
       ? el('ul', { class: 'lista' }, contas.map((c) => el('li', { class: 'cartao' },
           el('div', { class: 'linha' }, el('strong', {}, c.nome), el('strong', {}, reais(saldo[c.id]))),
-          el('p', { class: 'discreto' }, NOMES_CONTA[c.tipo] || c.tipo))))
-      : el('p', { class: 'discreto' }, 'Cadastre a primeira conta (banco, dinheiro ou carteira digital) para lançar o que já foi pago ou recebido.'),
+          el('div', { class: 'linha' },
+            el('span', { class: 'discreto' }, NOMES_CONTA[c.tipo] || c.tipo),
+            podeEditar && el('button', { class: 'link pequeno', onclick: async () => {
+              const atual = (saldo[c.id] / 100).toFixed(2).replace('.', ',');
+              const texto = prompt(`Qual é o saldo real de "${c.nome}" hoje? (agora o app mostra ${reais(saldo[c.id])})`, atual);
+              if (texto == null) return;
+              const neg = texto.trim().startsWith('-');
+              const novo = texto.trim().replace('-', '') === '0' ? 0 : lerValor(texto.replace('-', ''));
+              if (novo === null) { alert('Valor inválido.'); return; }
+              const desejado = neg ? -novo : novo;
+              const { error } = await supabase.from('contas')
+                .update({ saldo_inicial_centavos: c.saldo_inicial_centavos + (desejado - saldo[c.id]) }).eq('id', c.id);
+              if (error) { alert(mensagemErro(error)); return; }
+              recarregar();
+            } }, 'Ajustar saldo'),
+          ))))
+      : el('p', { class: 'discreto' }, 'Cadastre a primeira conta (banco, dinheiro ou carteira digital) com o saldo de hoje. O saldo inicial fica na conta, e não como receita, para não inflar as receitas do mês.'),
     podeEditar && formularioConta(espacoId, recarregar),
     el('p', { class: 'discreto' }, 'Cartões de crédito, faturas e parcelas chegam na próxima etapa.'),
   );
@@ -336,14 +354,28 @@ function formularioLancamento({ espacoId, contas, cats, podeEditar, ehDependente
   const data = el('input', { type: 'date', required: true, value: hojeISO() });
   const categoria = el('select', {});
   const conta = el('select', {}, contas.map((c) => el('option', { value: c.id }, c.nome)));
+  const observacao = el('textarea', { rows: '2', maxlength: '500', placeholder: 'Opcional. Ex.: parcela do material escolar, reembolsar depois…' });
   const previsto = el('input', { type: 'checkbox' });
   const erro = el('p', { class: 'erro', role: 'alert' });
   const botao = el('button', { type: 'submit' }, 'Salvar');
 
-  const preencherCategorias = () => {
-    categoria.replaceChildren(el('option', { value: '' }, 'Sem categoria'),
-      cats.filter((c) => c.tipo === tipoAtual).map((c) => el('option', { value: c.id }, c.rotulo)));
+  const preencherCategorias = (selecionar = '') => {
+    categoria.replaceChildren(...[
+      el('option', { value: '' }, 'Escolha a categoria…'),
+      ...cats.filter((c) => c.tipo === tipoAtual).map((c) => el('option', { value: c.id, selected: c.id === selecionar }, c.rotulo)),
+      podeEditar && el('option', { value: '__nova' }, '+ Criar nova categoria…'),
+    ].filter(Boolean));
   };
+  categoria.addEventListener('change', async () => {
+    if (categoria.value !== '__nova') return;
+    const nome = (prompt(tipoAtual === 'receita' ? 'Nome da nova categoria de receita:' : 'Nome da nova categoria de despesa:') || '').trim();
+    if (!nome) { categoria.value = ''; return; }
+    const { data: nova, error } = await supabase.from('categorias')
+      .insert({ espaco_id: espacoId, nome, tipo: tipoAtual }).select('id').single();
+    if (error) { erro.textContent = mensagemErro(error); categoria.value = ''; return; }
+    cats.unshift({ id: nova.id, tipo: tipoAtual, rotulo: nome });
+    preencherCategorias(nova.id);
+  });
   const botaoTipo = (t, rotulo) => el('button', { type: 'button', class: `aba ${t === tipoAtual ? 'ativa' : ''}`, onclick: (e) => {
     tipoAtual = t;
     form.querySelectorAll('.aba').forEach((b) => b.classList.remove('ativa'));
@@ -359,6 +391,7 @@ function formularioLancamento({ espacoId, contas, cats, podeEditar, ehDependente
     let status = ehPrevisto ? 'previsto' : 'confirmado';
     if (ehDependente) status = 'pendente_confirmacao';
     if (status === 'confirmado' && !conta.value) { erro.textContent = 'Cadastre uma conta abaixo, ou marque como previsão.'; return; }
+    if (categoria.value === '__nova') { erro.textContent = 'Escolha a categoria.'; return; }
     botao.disabled = true;
     const { error } = await supabase.from('lancamentos').insert({
       espaco_id: espacoId,
@@ -371,6 +404,7 @@ function formularioLancamento({ espacoId, contas, cats, podeEditar, ehDependente
       data_competencia: competencia(data.value),
       categoria_id: categoria.value || null,
       conta_id: status === 'confirmado' ? conta.value : (conta.value || null),
+      observacao: observacao.value.trim() || null,
       origem: 'app',
     });
     botao.disabled = false;
@@ -384,6 +418,7 @@ function formularioLancamento({ espacoId, contas, cats, podeEditar, ehDependente
     el('label', {}, 'Data', data),
     el('label', {}, 'Categoria', categoria),
     contas.length ? el('label', {}, 'Conta', conta) : null,
+    el('label', {}, 'Observação', observacao),
     !ehDependente && el('label', { class: 'marcar' }, previsto, 'É só uma previsão (ainda não foi pago ou recebido)'),
     ehDependente && el('p', { class: 'discreto' }, 'Seu lançamento vai para aprovação do responsável.'),
     erro, botao,
@@ -433,6 +468,7 @@ function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar }) 
       el('strong', { class: sinal }, (l.tipo === 'despesa' ? '− ' : '+ ') + reais(l.valor_centavos)),
     ),
     el('p', { class: 'discreto' }, [dataCurta(l.data), nomeCat[l.categoria_id], nomeConta[l.conta_id]].filter(Boolean).join(' · ')),
+    l.observacao ? el('p', { class: 'observacao' }, l.observacao) : null,
     etiquetas.length ? el('div', { class: 'acoes' }, etiquetas) : null,
     diferenca, acoes, erro,
   );
@@ -501,7 +537,7 @@ async function rotear() {
 
 window.addEventListener('hashchange', () => { estado.mes = mesAtual(); rotear(); });
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); promptInstalacao = e; });
-supabase.auth.onAuthStateChange((evento) => { if (evento === 'SIGNED_OUT') { usuario = null; categorias = null; location.hash = ''; telaEmail(); } });
+supabase.auth.onAuthStateChange((evento) => { if (evento === 'SIGNED_OUT') { usuario = null; location.hash = ''; telaEmail(); } });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 // remove o token da barra de endereço se a pessoa entrou pelo link do e-mail

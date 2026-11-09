@@ -51,7 +51,8 @@ input {
   padding: 14px 16px; border-radius: 12px;
   border: 1px solid var(--borda); background: var(--cartao); color: var(--texto);
 }
-input:focus { outline: 2px solid var(--cor); outline-offset: 1px; }
+textarea { font: inherit; font-weight: 400; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--borda); background: var(--cartao); color: var(--texto); resize: vertical; }
+input:focus, textarea:focus, select:focus { outline: 2px solid var(--cor); outline-offset: 1px; }
 input.codigo { font-size: 1.5rem; letter-spacing: 0.4em; text-align: center; }
 
 button {
@@ -107,3 +108,5 @@ button.pequeno { padding: 9px 14px; font-size: 0.92rem; }
 .mes button { min-width: 44px; }
 label.marcar { flex-direction: row; align-items: center; gap: 10px; font-weight: 400; }
 label.marcar input { width: 22px; height: 22px; }
+
+.observacao { font-size: 0.9rem; color: var(--discreto); font-style: italic; border-left: 3px solid var(--borda); padding-left: 10px; }
