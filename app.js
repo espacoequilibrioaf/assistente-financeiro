@@ -69,7 +69,7 @@ function nomeMes(mes) {
 }
 function dataCurta(iso) { const [, m, d] = iso.split('-'); return `${d}/${m}`; }
 
-const NOMES_TIPO = { pessoal: 'Pessoal', familia: 'Família', empresa: 'Empresa' };
+const NOMES_TIPO = { pessoal: 'Pessoal', familia: 'Família', empresa: 'Empresa', viagem: 'Viagem' };
 const NOMES_PAPEL = { dono: 'dono', editor: 'pode editar', leitor: 'só leitura', dependente: 'dependente' };
 const NOMES_CONTA = { corrente: 'Conta corrente', poupanca: 'Poupança', dinheiro: 'Dinheiro', carteira_digital: 'Carteira digital', investimento: 'Investimento', outra: 'Outra' };
 
@@ -156,7 +156,7 @@ async function telaInicio() {
   const { data: membros, error } = await supabase
     .from('membros_espaco').select('papel, espacos ( id, nome, tipo )').eq('usuario_id', usuario.id);
   if (error) return telaErro(`Não foi possível carregar seus espaços: ${mensagemErro(error)}`);
-  const ordem = { pessoal: 0, familia: 1, empresa: 2 };
+  const ordem = { pessoal: 0, familia: 1, empresa: 2, viagem: 3 };
   const espacos = membros.filter((m) => m.espacos).map((m) => ({ ...m.espacos, papel: m.papel }))
     .sort((a, b) => (ordem[a.tipo] - ordem[b.tipo]) || a.nome.localeCompare(b.nome, 'pt-BR'));
 
@@ -169,7 +169,7 @@ async function telaInicio() {
 
   // criar espaço de família ou empresa
   const nome = el('input', { name: 'nome', required: true, maxlength: '60', placeholder: 'Ex.: Família, doPontoAparaB, Espaço Equilíbrio' });
-  const tipo = el('select', { name: 'tipo' }, el('option', { value: 'familia' }, 'Família'), el('option', { value: 'empresa' }, 'Empresa'));
+  const tipo = el('select', { name: 'tipo' }, el('option', { value: 'familia' }, 'Família'), el('option', { value: 'empresa' }, 'Empresa'), el('option', { value: 'viagem' }, 'Viagem (separada do dia a dia)'));
   const erroCriar = el('p', { class: 'erro', role: 'alert' });
   const formCriar = el('form', { class: 'cartao tela escondido', onsubmit: async (e) => {
     e.preventDefault();
@@ -177,6 +177,13 @@ async function telaInicio() {
     const { data, error: erro } = await supabase.from('espacos')
       .insert({ nome: nome.value.trim(), tipo: tipo.value, criado_por: usuario.id }).select('id').single();
     if (erro) { erroCriar.textContent = mensagemErro(erro); return; }
+    if (tipo.value === 'viagem') {
+      const { data: proj, error: e2 } = await supabase.from('projetos')
+        .insert({ espaco_id: data.id, nome: nome.value.trim(), tipo: 'viagem', moedas: ['BRL', 'USD', 'EUR'] }).select('id').single();
+      if (e2) { erroCriar.textContent = mensagemErro(e2); return; }
+      await supabase.from('projeto_rubricas').insert(RUBRICAS_VIAGEM.map((n, i) => ({ espaco_id: data.id, projeto_id: proj.id, nome: n, ordem: i })));
+      location.hash = `#/projeto/${proj.id}`; return;
+    }
     location.hash = `#/espaco/${data.id}`;
   } },
     el('strong', {}, 'Novo espaço'),
@@ -224,13 +231,18 @@ async function carregarCategorias(espacoId) {
 }
 
 async function telaEspaco(espacoId) {
+  const { data: viagem } = await supabase.from('espacos').select('tipo, projetos ( id )').eq('id', espacoId).single();
+  if (viagem && viagem.tipo === 'viagem' && viagem.projetos && viagem.projetos.length) {
+    history.replaceState(null, '', `#/projeto/${viagem.projetos[0].id}`);
+    return telaProjeto(viagem.projetos[0].id);
+  }
   const mes = estado.mes;
   const [espR, papelR, contasR, mesR, saldosR, membrosR, projR, anoR] = await Promise.all([
     supabase.from('espacos').select('id, nome, tipo').eq('id', espacoId).single(),
     supabase.from('membros_espaco').select('papel').eq('espaco_id', espacoId).eq('usuario_id', usuario.id).single(),
     supabase.from('contas').select('id, nome, tipo, saldo_inicial_centavos').eq('espaco_id', espacoId).eq('ativa', true).order('nome'),
     supabase.from('lancamentos')
-      .select('id, tipo, status, descricao, observacao, valor_centavos, valor_previsto_centavos, data, categoria_id, conta_id, moeda, valor_original, cotacao, projeto_id, pago_por, transferencia_sentido, transferencia_par_id')
+      .select('id, tipo, status, descricao, observacao, valor_centavos, valor_previsto_centavos, data, categoria_id, conta_id, moeda, valor_original, cotacao, projeto_id, pago_por, transferencia_sentido, transferencia_par_id, situacao')
       .eq('espaco_id', espacoId).eq('data_competencia', `${mes}-01`).neq('status', 'cancelado')
       .order('data', { ascending: false }).order('criado_em', { ascending: false }),
     supabase.from('lancamentos').select('conta_id, tipo, valor_centavos, transferencia_sentido').eq('espaco_id', espacoId).eq('status', 'confirmado'),
@@ -263,7 +275,10 @@ async function telaEspaco(espacoId) {
   const aReceber = soma((l) => l.status === 'previsto' && l.tipo === 'receita');
 
   // saldos das contas (saldo inicial + receitas − despesas confirmadas)
-  const saldo = calcularSaldos(contas, saldosR.data);
+  let movs, editaveis;
+  try { [movs, editaveis] = await Promise.all([movimentosDasContas(contas.map((c) => c.id)), contasEditaveis()]); }
+  catch (e) { return telaErro(mensagemErro(e)); }
+  const saldo = calcularSaldos(contas, movs);
   const saldoTotal = Object.values(saldo).reduce((a, b) => a + b, 0);
 
   const recarregar = () => telaEspaco(espacoId);
@@ -330,7 +345,7 @@ async function telaEspaco(espacoId) {
           ))))
       : el('p', { class: 'discreto' }, 'Cadastre a primeira conta (banco, dinheiro ou carteira digital) com o saldo de hoje. O saldo inicial fica na conta, e não como receita, para não inflar as receitas do mês.'),
     podeEditar && formularioConta(espacoId, recarregar),
-    podeEditar && contas.length >= 2 && formularioTransferencia(contas, recarregar),
+    podeEditar && editaveis.length >= 2 && formularioTransferencia(editaveis, recarregar, espacoId),
     el('p', { class: 'discreto' }, 'Cartões de crédito, faturas e parcelas chegam na próxima etapa.'),
   );
 
@@ -350,6 +365,23 @@ async function telaEspaco(espacoId) {
     blocoProjetos(espacoId, projR.data, podeEditar),
     blocoContas, blocoMembros,
   ));
+}
+
+async function contasEditaveis() {
+  const { data, error } = await supabase.from('membros_espaco')
+    .select('papel, espacos ( id, nome, contas ( id, nome, tipo, saldo_inicial_centavos, ativa ) )')
+    .eq('usuario_id', usuario.id).in('papel', ['dono', 'editor']);
+  if (error) throw error;
+  return data.flatMap((m) => (m.espacos?.contas || []).filter((c) => c.ativa)
+    .map((c) => ({ ...c, espaco_id: m.espacos.id, espaco_nome: m.espacos.nome })));
+}
+
+async function movimentosDasContas(ids) {
+  if (!ids.length) return [];
+  const { data, error } = await supabase.from('lancamentos').select('conta_id, tipo, valor_centavos, transferencia_sentido')
+    .in('conta_id', ids).eq('status', 'confirmado');
+  if (error) throw error;
+  return data;
 }
 
 function calcularSaldos(contas, movimentos) {
@@ -555,11 +587,13 @@ function formularioLancamento({ espacoId, contas, cats, podeEditar, ehDependente
   return el('div', { class: 'tela' }, abrir, form);
 }
 
-function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, nomePessoa = {}, nomeRubrica = {} }) {
+function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, nomePessoa = {}, nomeRubrica = {}, nomeLocal = {} }) {
   const ehTransf = l.tipo === 'transferencia';
   const ids = ehTransf && l.transferencia_par_id ? [l.id, l.transferencia_par_id] : [l.id];
   const sinal = ehTransf ? '' : (l.tipo === 'receita' ? 'positivo' : 'negativo');
   const etiquetas = [];
+  const SITUACAO = { pago: 'Pago', reservado: 'Reservado', a_confirmar: 'A confirmar' };
+  if (l.situacao && SITUACAO[l.situacao] && !(l.situacao === 'pago' && l.status === 'confirmado')) etiquetas.push(el('span', { class: 'etiqueta' }, SITUACAO[l.situacao]));
   if (l.status === 'previsto') etiquetas.push(el('span', { class: 'etiqueta ouro' }, 'Previsto'));
   if (l.status === 'pendente_confirmacao') etiquetas.push(el('span', { class: 'etiqueta ouro' }, 'Aguardando aprovação'));
   const diferenca = l.status === 'confirmado' && l.valor_previsto_centavos && l.valor_previsto_centavos !== l.valor_centavos
@@ -599,8 +633,10 @@ function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, no
     ),
     el('p', { class: 'discreto' }, [dataCurta(l.data), ehTransf ? `Transferência · ${l.transferencia_sentido === 'saida' ? 'saiu de' : 'entrou em'} ${nomeConta[l.conta_id] || 'outra conta'}` : nomeCat[l.categoria_id], ehTransf ? null : nomeConta[l.conta_id]].filter(Boolean).join(' · ')),
     l.moeda && l.moeda !== 'BRL' && l.valor_original ? el('p', { class: 'discreto' }, `${numero(l.valor_original)} ${l.moeda} · cotação R$ ${numero(l.cotacao, 4)}`) : null,
-    (l.rubrica_id && nomeRubrica[l.rubrica_id]) || (l.pago_por && nomePessoa[l.pago_por])
-      ? el('p', { class: 'discreto' }, [nomeRubrica[l.rubrica_id], l.pago_por && nomePessoa[l.pago_por] && `pago por ${nomePessoa[l.pago_por]}`].filter(Boolean).join(' · ')) : null,
+    (l.rubrica_id && nomeRubrica[l.rubrica_id]) || (l.local_id && nomeLocal[l.local_id]) || l.favorecido || (l.pago_por && nomePessoa[l.pago_por])
+      ? el('p', { class: 'discreto' }, [nomeRubrica[l.rubrica_id], nomeLocal[l.local_id],
+          l.favorecido && l.status !== 'confirmado' ? `a pagar para ${l.favorecido}` : null,
+          l.status === 'confirmado' && l.pago_por && nomePessoa[l.pago_por] ? `pago por ${nomePessoa[l.pago_por]}` : null].filter(Boolean).join(' · ')) : null,
     l.observacao ? el('p', { class: 'observacao' }, l.observacao) : null,
     etiquetas.length ? el('div', { class: 'acoes' }, etiquetas) : null,
     diferenca, acoes, erro,
@@ -632,9 +668,11 @@ function formularioConta(espacoId, aoSalvar) {
   return el('div', { class: 'tela' }, el('button', { class: 'secundario', onclick: () => { form.classList.toggle('escondido'); nome.focus(); } }, '+ Nova conta'), form);
 }
 
-function formularioTransferencia(contas, aoSalvar) {
-  const de = el('select', {}, contas.map((c) => el('option', { value: c.id }, c.nome)));
-  const para = el('select', {}, contas.map((c, i) => el('option', { value: c.id, selected: i === 1 }, c.nome)));
+function formularioTransferencia(contas, aoSalvar, espacoAtual = null) {
+  const rotulo = (c) => (c.espaco_nome && c.espaco_id !== espacoAtual ? `${c.nome} (${c.espaco_nome})` : c.nome);
+  const daqui = contas.filter((c) => !espacoAtual || c.espaco_id === espacoAtual);
+  const de = el('select', {}, contas.map((c) => el('option', { value: c.id, selected: c.id === (contas.find((x) => x.espaco_id !== espacoAtual) || {}).id }, rotulo(c))));
+  const para = el('select', {}, contas.map((c) => el('option', { value: c.id, selected: c.id === (daqui[0] || {}).id }, rotulo(c))));
   const valor = el('input', { inputmode: 'decimal', required: true, placeholder: '0,00' });
   const data = el('input', { type: 'date', required: true, value: hojeISO() });
   const desc = el('input', { maxlength: '120', placeholder: 'Ex.: dinheiro para a viagem, compra de baht' });
@@ -652,7 +690,7 @@ function formularioTransferencia(contas, aoSalvar) {
     if (error) { erro.textContent = mensagemErro(error); return; }
     aoSalvar();
   } },
-    el('p', { class: 'discreto' }, 'Dinheiro que muda de lugar entre contas suas (ex.: do banco para a Wise, ou para a compra de moeda em espécie). Não conta como gasto nem como receita.'),
+    el('p', { class: 'discreto' }, 'Dinheiro que muda de lugar entre contas suas, inclusive de um espaço para outro (ex.: do Santander do Pessoal para a Wise da viagem). Não conta como gasto nem como receita.'),
     el('label', {}, 'Sai de', de), el('label', {}, 'Entra em', para),
     el('label', {}, 'Valor em reais', valor), el('label', {}, 'Data', data), el('label', {}, 'Descrição', desc),
     el('label', { class: 'marcar' }, prev, 'É só uma previsão'),
@@ -713,6 +751,25 @@ function lerNumero(texto) {
 }
 
 function diasEntre(a, b) { return Math.round((Date.parse(b) - Date.parse(a)) / 864e5); }
+
+function roteiroDiaADia(lancs, item, nomeLocal) {
+  const dias = {};
+  for (const l of lancs) (dias[l.data] = dias[l.data] || []).push(l);
+  const hoje = hojeISO();
+  return el('div', { class: 'tela' }, Object.keys(dias).sort().map((d) => {
+    const ls = dias[d];
+    const total = ls.filter((l) => l.tipo === 'despesa').reduce((a, l) => a + l.valor_centavos, 0);
+    const pago = ls.filter((l) => l.tipo === 'despesa' && l.status === 'confirmado').reduce((a, l) => a + l.valor_centavos, 0);
+    const locais = [...new Set(ls.map((l) => nomeLocal[l.local_id]).filter(Boolean))].join(' · ');
+    const semana = new Date(`${d}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '');
+    return el('details', { class: 'dia', open: d === hoje },
+      el('summary', {},
+        el('span', { class: 'dia-titulo' }, `${semana} ${dataCurta(d)}`, locais && el('span', { class: 'discreto' }, ` · ${locais}`)),
+        el('span', { class: 'dia-total' }, reais(total), pago && pago < total ? el('span', { class: 'discreto pequeno-texto' }, ` (pago ${reais(pago)})`) : null)),
+      el('ul', { class: 'lista' }, ls.map(item)),
+    );
+  }));
+}
 
 // Conversor rápido: digita na moeda local e vê em reais (ou o contrário)
 function conversorRapido(moedas) {
@@ -808,26 +865,34 @@ async function telaProjeto(projetoId) {
   const pR = await supabase.from('projetos').select('*').eq('id', projetoId).single();
   if (pR.error) return telaErro(`Não foi possível abrir: ${mensagemErro(pR.error)}`);
   const proj = pR.data; const espacoId = proj.espaco_id;
-  const [espR, papelR, rubR, lancR, contasR, membrosR, movR] = await Promise.all([
+  const [espR, papelR, rubR, locR, lancR, contasR, membrosR] = await Promise.all([
     supabase.from('espacos').select('id, nome, tipo').eq('id', espacoId).single(),
     supabase.from('membros_espaco').select('papel').eq('espaco_id', espacoId).eq('usuario_id', usuario.id).single(),
     supabase.from('projeto_rubricas').select('id, nome, valor_previsto_centavos, ordem').eq('projeto_id', projetoId).order('ordem'),
+    supabase.from('projeto_locais').select('id, nome, valor_previsto_centavos, data_inicio, data_fim, ordem').eq('projeto_id', projetoId).order('ordem'),
     supabase.from('lancamentos')
-      .select('id, tipo, status, descricao, observacao, valor_centavos, valor_previsto_centavos, data, categoria_id, conta_id, moeda, valor_original, cotacao, rubrica_id, pago_por')
-      .eq('projeto_id', projetoId).neq('status', 'cancelado').order('data', { ascending: false }).order('criado_em', { ascending: false }),
+      .select('id, tipo, status, descricao, observacao, valor_centavos, valor_previsto_centavos, data, categoria_id, conta_id, moeda, valor_original, cotacao, rubrica_id, local_id, favorecido, pago_por, situacao')
+      .eq('projeto_id', projetoId).neq('status', 'cancelado').order('data').order('criado_em'),
     supabase.from('contas').select('id, nome, tipo, saldo_inicial_centavos').eq('espaco_id', espacoId).eq('ativa', true).order('nome'),
-    supabase.from('membros_espaco').select('usuario_id, perfis ( nome )').eq('espaco_id', espacoId),
-    supabase.from('lancamentos').select('conta_id, tipo, valor_centavos, transferencia_sentido').eq('espaco_id', espacoId).eq('status', 'confirmado'),
+    supabase.from('membros_espaco').select('usuario_id, papel, perfis ( nome )').eq('espaco_id', espacoId),
   ]);
-  const falha = [espR, papelR, rubR, lancR, contasR, membrosR, movR].find((r) => r.error);
+  const falha = [espR, papelR, rubR, locR, lancR, contasR, membrosR].find((r) => r.error);
   if (falha) return telaErro(`Não foi possível abrir: ${mensagemErro(falha.error)}`);
-  let cats; try { cats = await carregarCategorias(espacoId); } catch (e) { return telaErro(mensagemErro(e)); }
+  let cats, editaveis, movs;
+  try {
+    [cats, editaveis, movs] = await Promise.all([carregarCategorias(espacoId), contasEditaveis(), movimentosDasContas(contasR.data.map((c) => c.id))]);
+  } catch (e) { return telaErro(mensagemErro(e)); }
+  const ehEspacoViagem = espR.data.tipo === 'viagem';
+  const locais = locR.data;
+  const nomeLocal = Object.fromEntries(locais.map((l) => [l.id, l.nome]));
 
   const papel = papelR.data.papel; const podeEditar = papel === 'dono' || papel === 'editor';
   const rubricas = rubR.data; const lancs = lancR.data; const contas = contasR.data;
   const nomePessoa = Object.fromEntries(membrosR.data.map((m) => [m.usuario_id, (m.perfis && m.perfis.nome) || 'Sem nome']));
   const nomeRubrica = Object.fromEntries(rubricas.map((r) => [r.id, r.nome]));
-  const nomeConta = Object.fromEntries(contas.map((c) => [c.id, c.nome]));
+  // contas que podem pagar gastos da viagem: as da viagem e as suas de outros espaços (ex.: Santander do Pessoal)
+  const contasPagamento = [...contas.map((c) => ({ ...c, espaco_id: espacoId })), ...editaveis.filter((c) => c.espaco_id !== espacoId)];
+  const nomeConta = Object.fromEntries(contasPagamento.map((c) => [c.id, c.espaco_id === espacoId ? c.nome : `${c.nome} (${c.espaco_nome})`]));
   const nomeCat = Object.fromEntries(cats.map((c) => [c.id, c.rotulo]));
   const catViagem = (cats.find((c) => c.rotulo === 'Lazer › Viagens') || {}).id || null;
   const recarregar = () => telaProjeto(projetoId);
@@ -896,7 +961,7 @@ async function telaProjeto(projetoId) {
   );
 
   // dinheiro para a viagem: carteiras digitais (ex.: Wise) e dinheiro em espécie
-  const saldos = calcularSaldos(contas, movR.data);
+  const saldos = calcularSaldos(contas, movs);
   const contasViagem = contas.filter((c) => c.tipo === 'carteira_digital' || c.tipo === 'dinheiro');
   const blocoDinheiro = el('div', { class: 'cartao tela' },
     el('div', { class: 'linha' }, el('strong', {}, 'Dinheiro para a viagem'), el('strong', {}, reais(contasViagem.reduce((a, c) => a + saldos[c.id], 0)))),
@@ -905,6 +970,50 @@ async function telaProjeto(projetoId) {
       : el('p', { class: 'discreto' }, `Cadastre no espaço “${espR.data.nome}” uma conta “Wise” (tipo Carteira digital) e uma “Dinheiro em espécie” (tipo Dinheiro). Depois use “⇄ Transferir entre contas” para registrar o dinheiro colocado nelas.`),
     contasViagem.length ? el('p', { class: 'discreto pequeno-texto' }, 'Valores em reais. Gastos pagos por essas contas descontam daqui. Se o saldo real da Wise ficar diferente por causa do câmbio, use “Ajustar saldo” na conta.') : null,
     el('a', { class: 'link', href: `#/espaco/${espacoId}` }, 'Ir para as contas do espaço'),
+  );
+
+  // a pagar para pessoas (ex.: Thiago, que já comprou passagens e hotel)
+  const devidos = {};
+  despesas.filter((l) => l.status !== 'confirmado' && l.favorecido).forEach((l) => {
+    devidos[l.favorecido] = devidos[l.favorecido] || { total: 0, itens: [] };
+    devidos[l.favorecido].total += l.valor_centavos; devidos[l.favorecido].itens.push(l);
+  });
+  const blocoDevidos = Object.keys(devidos).length > 0 && el('div', { class: 'cartao tela' },
+    el('strong', {}, 'A pagar para pessoas'),
+    Object.entries(devidos).map(([quem, d]) => el('div', { class: 'tela' },
+      el('div', { class: 'linha' }, el('span', {}, quem), el('strong', { class: 'negativo' }, reais(d.total))),
+      el('ul', { class: 'vencimentos' }, d.itens.map((l) => el('li', { class: 'linha' },
+        el('span', { class: 'discreto' }, l.descricao || nomeRubrica[l.rubrica_id] || 'Sem descrição'), el('span', {}, reais(l.valor_centavos))))),
+    )),
+    el('p', { class: 'discreto pequeno-texto' }, 'Quando pagar, toque em “Confirmar valor real” no gasto e escolha de qual conta saiu (pode ser o Santander do Pessoal).'),
+  );
+
+  // reserva por localidade
+  const usoLocal = (id) => despesas.filter((l) => l.local_id === id).reduce((a, l) => a + l.valor_centavos, 0);
+  const maiorLocal = Math.max(1, ...locais.map((r) => Math.max(r.valor_previsto_centavos, usoLocal(r.id))));
+  const blocoLocais = el('div', { class: 'cartao tela' },
+    el('strong', {}, 'Reserva por local'),
+    locais.length ? el('ul', { class: 'barras' }, locais.map((r) => {
+      const usado = usoLocal(r.id);
+      return el('li', {},
+        el('div', { class: 'linha' }, el('span', {}, r.nome + (r.data_inicio ? ` · ${dataCurta(r.data_inicio)}${r.data_fim ? `–${dataCurta(r.data_fim)}` : ''}` : '')),
+          el('span', {}, el('strong', { class: usado > r.valor_previsto_centavos && r.valor_previsto_centavos ? 'negativo' : '' }, reais(usado)), ` de ${reais(r.valor_previsto_centavos)}`)),
+        el('div', { class: 'trilho' },
+          el('span', { class: 'seg saida', style: `width:${(usado / maiorLocal) * 100}%` }),
+          r.valor_previsto_centavos > usado ? el('span', { class: 'seg saida previsto', style: `width:${((r.valor_previsto_centavos - usado) / maiorLocal) * 100}%` }) : null),
+        podeEditar && el('button', { class: 'link pequeno', onclick: async () => {
+          const t = prompt(`Quanto reservar para ${r.nome}? (R$)`, (r.valor_previsto_centavos / 100).toFixed(2).replace('.', ','));
+          if (t == null) return;
+          const v = t.trim() === '0' ? 0 : lerValor(t); if (v === null) { alert('Valor inválido.'); return; }
+          const { error } = await supabase.from('projeto_locais').update({ valor_previsto_centavos: v }).eq('id', r.id);
+          if (error) { alert(mensagemErro(error)); return; } recarregar();
+        } }, 'Definir reserva'));
+    })) : el('p', { class: 'discreto' }, 'Cadastre as cidades da viagem para separar uma reserva para cada uma.'),
+    podeEditar && el('button', { class: 'link', onclick: async () => {
+      const n = (prompt('Nome do local (ex.: Bangkok, Chiang Mai, Nova Délhi):') || '').trim(); if (!n) return;
+      const { error } = await supabase.from('projeto_locais').insert({ espaco_id: espacoId, projeto_id: projetoId, nome: n, ordem: locais.length });
+      if (error) { alert(mensagemErro(error)); return; } recarregar();
+    } }, '+ Local'),
   );
 
   // quem pagou
@@ -923,10 +1032,14 @@ async function telaProjeto(projetoId) {
   const desc = el('input', { maxlength: '120', placeholder: 'Ex.: jantar, tuk-tuk, templo' });
   const data = el('input', { type: 'date', required: true, value: hoje });
   const rub = el('select', {}, el('option', { value: '' }, 'Escolha o item…'), rubricas.map((r) => el('option', { value: r.id }, r.nome)));
-  const ordemConta = (c) => (c.tipo === 'carteira_digital' ? 0 : c.tipo === 'dinheiro' ? 1 : 2);
-  const conta = el('select', {}, [...contas].sort((a, b) => ordemConta(a) - ordemConta(b)).map((c) => el('option', { value: c.id }, c.nome)));
+  const ordemConta = (c) => (c.espaco_id !== espacoId ? 3 : c.tipo === 'carteira_digital' ? 0 : c.tipo === 'dinheiro' ? 1 : 2);
+  const conta = el('select', {}, [...contasPagamento].sort((a, b) => ordemConta(a) - ordemConta(b)).map((c) => el('option', { value: c.id }, nomeConta[c.id])));
+  const local = el('select', {}, el('option', { value: '' }, 'Sem local específico'), locais.map((l) => el('option', { value: l.id }, l.nome)));
+  const favorecido = el('input', { maxlength: '80', placeholder: 'Ex.: Thiago' });
+  const blocoFavorecido = el('label', { class: 'escondido' }, 'A pagar para (pessoa)', favorecido);
   const pagador = el('select', {}, Object.entries(nomePessoa).map(([id, n]) => el('option', { value: id, selected: id === usuario.id }, n)));
   const prev = el('input', { type: 'checkbox' });
+  prev.addEventListener('change', () => blocoFavorecido.classList.toggle('escondido', !prev.checked));
   const obs = el('textarea', { rows: '2', maxlength: '500', placeholder: 'Opcional' });
   const erro = el('p', { class: 'erro', role: 'alert' });
   const blocoCot = el('label', { class: 'escondido' }, 'Cotação (R$ por 1)', cot);
@@ -954,7 +1067,7 @@ async function telaProjeto(projetoId) {
     if (!v) { erro.textContent = 'Digite o valor.'; return; }
     if (!c) { erro.textContent = 'Digite a cotação.'; return; }
     const status = prev.checked ? 'previsto' : 'confirmado';
-    if (status === 'confirmado' && !conta.value) { erro.textContent = 'Cadastre uma conta neste espaço, ou marque como previsão.'; return; }
+    if (status === 'confirmado' && !conta.value) { erro.textContent = 'Cadastre uma conta, ou marque como previsão.'; return; }
     const centavos = Math.round(v * c * 100);
     botao.disabled = true;
     const { error } = await supabase.from('lancamentos').insert({
@@ -962,7 +1075,8 @@ async function telaProjeto(projetoId) {
       descricao: desc.value.trim(), valor_centavos: centavos, valor_previsto_centavos: status === 'previsto' ? centavos : null,
       data: data.value, data_competencia: competencia(data.value),
       categoria_id: catViagem, conta_id: conta.value || null,
-      projeto_id: projetoId, rubrica_id: rub.value || null,
+      projeto_id: projetoId, rubrica_id: rub.value || null, local_id: local.value || null,
+      favorecido: prev.checked && favorecido.value.trim() ? favorecido.value.trim() : null,
       moeda: moeda.value, valor_original: moeda.value === 'BRL' ? null : v, cotacao: moeda.value === 'BRL' ? null : c,
       pago_por: pagador.value || usuario.id, observacao: obs.value.trim() || null, origem: 'app',
     });
@@ -975,9 +1089,11 @@ async function telaProjeto(projetoId) {
     el('label', {}, 'Descrição', desc),
     el('label', {}, 'Data', data),
     el('label', {}, 'Item do orçamento', rub),
-    contas.length ? el('label', {}, 'Conta ou cartão', conta) : el('p', { class: 'discreto' }, 'Este espaço ainda não tem conta; o gasto pode ficar como previsão.'),
+    el('label', {}, 'Local', local),
+    contasPagamento.length ? el('label', {}, 'De onde saiu o dinheiro', conta) : el('p', { class: 'discreto' }, 'Ainda não há conta; o gasto pode ficar como previsão.'),
     el('label', {}, 'Quem pagou', pagador),
-    el('label', { class: 'marcar' }, prev, 'É só uma previsão (reserva, ainda não pago)'),
+    el('label', { class: 'marcar' }, prev, 'Ainda não foi pago (previsão ou dívida com alguém)'),
+    blocoFavorecido,
     el('label', {}, 'Observação', obs),
     erro, botao,
   );
@@ -989,19 +1105,32 @@ async function telaProjeto(projetoId) {
   const datas = proj.data_inicio ? `${dataCurta(proj.data_inicio)}${proj.data_fim ? ` a ${dataCurta(proj.data_fim)}` : ''}` : null;
   mostrar(el('section', { class: 'tela' },
     marca(),
-    el('a', { class: 'link', href: `#/espaco/${espacoId}` }, `‹ ${espR.data.nome}`),
+    el('a', { class: 'link', href: ehEspacoViagem ? '#/' : `#/espaco/${espacoId}` }, ehEspacoViagem ? '‹ Seus espaços' : `‹ ${espR.data.nome}`),
     el('div', { class: 'linha' }, el('h1', {}, proj.nome), datas && el('span', { class: 'etiqueta' }, datas)),
     conversorRapido(proj.moedas || []),
     resumo,
     blocoDinheiro,
     podeEditar && el('button', { onclick: () => { form.classList.toggle('escondido'); valor.focus(); } }, '+ Gasto da viagem'),
     podeEditar && form,
+    blocoDevidos,
+    blocoLocais,
     blocoRubricas,
     blocoPessoas,
-    el('h2', {}, 'Gastos'),
-    lancs.length ? el('ul', { class: 'lista' }, lancs.map((l) => itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar: recarregar, nomePessoa, nomeRubrica })))
+    el('h2', {}, 'Roteiro dia a dia'),
+    lancs.length ? roteiroDiaADia(lancs, (l) => itemLancamento(l, { nomeCat, nomeConta, contas: contasPagamento.map((c) => ({ ...c, nome: nomeConta[c.id] })), podeEditar, aoMudar: recarregar, nomePessoa, nomeRubrica, nomeLocal }), nomeLocal)
       : el('p', { class: 'discreto' }, 'Nenhum gasto ainda. As reservas já pagas (passagem, hotel) podem entrar aqui também.'),
-    el('p', { class: 'discreto' }, 'Os gastos da viagem também aparecem no mês do espaço, na categoria Lazer › Viagens. Quando a fatura do cartão chegar, use “Confirmar valor real” para acertar o valor em reais com IOF.'),
+    el('p', { class: 'discreto' }, 'Quando a fatura do cartão chegar, use “Confirmar valor real” para acertar o valor em reais com IOF.'),
+    ehEspacoViagem && el('div', { class: 'tela' },
+      el('h2', {}, 'Contas da viagem'),
+      contas.length ? el('ul', { class: 'lista' }, contas.map((c) => el('li', { class: 'cartao linha' }, el('span', {}, `${c.nome} · ${NOMES_CONTA[c.tipo] || c.tipo}`), el('strong', {}, reais(saldos[c.id])))))
+        : el('p', { class: 'discreto' }, 'Ex.: “Wise” (Carteira digital) e “Dinheiro em espécie” (Dinheiro).'),
+      podeEditar && formularioConta(espacoId, recarregar),
+      podeEditar && editaveis.length >= 2 && formularioTransferencia(editaveis, recarregar, espacoId),
+      el('h2', {}, 'Quem participa'),
+      el('ul', { class: 'lista' }, membrosR.data.map((m) => el('li', { class: 'cartao linha' },
+        el('span', {}, (m.perfis && m.perfis.nome) || 'Sem nome'), el('span', { class: 'etiqueta' }, NOMES_PAPEL[m.papel] || m.papel)))),
+      papel === 'dono' && formularioConvite(espacoId, recarregar),
+    ),
   ));
 }
 

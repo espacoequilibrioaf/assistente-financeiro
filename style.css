@@ -163,3 +163,13 @@ svg.grafico .divisa-ano { stroke: var(--borda); stroke-dasharray: 3 3; }
 .grade-valor select { width: 100%; }
 
 .conversao { font-size: 1.5rem; }
+
+details.dia { background: var(--cartao); border: 1px solid var(--borda); border-radius: var(--raio); padding: 10px 14px; }
+details.dia > summary { display: flex; justify-content: space-between; gap: 10px; color: var(--texto); font-weight: 600; list-style: none; cursor: pointer; }
+details.dia > summary::-webkit-details-marker { display: none; }
+details.dia[open] > summary { margin-bottom: 10px; }
+.dia-titulo { min-width: 0; }
+.dia-total { white-space: nowrap; }
+details.dia .cartao { border-color: var(--borda); }
+.linha > :first-child { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.linha > :last-child { flex-shrink: 0; }
