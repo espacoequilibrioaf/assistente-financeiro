@@ -224,7 +224,7 @@ async function carregarCategorias(espacoId) {
 
 async function telaEspaco(espacoId) {
   const mes = estado.mes;
-  const [espR, papelR, contasR, mesR, saldosR, membrosR] = await Promise.all([
+  const [espR, papelR, contasR, mesR, saldosR, membrosR, anoR] = await Promise.all([
     supabase.from('espacos').select('id, nome, tipo').eq('id', espacoId).single(),
     supabase.from('membros_espaco').select('papel').eq('espaco_id', espacoId).eq('usuario_id', usuario.id).single(),
     supabase.from('contas').select('id, nome, tipo, saldo_inicial_centavos').eq('espaco_id', espacoId).eq('ativa', true).order('nome'),
@@ -234,8 +234,11 @@ async function telaEspaco(espacoId) {
       .order('data', { ascending: false }).order('criado_em', { ascending: false }),
     supabase.from('lancamentos').select('conta_id, tipo, valor_centavos').eq('espaco_id', espacoId).eq('status', 'confirmado'),
     supabase.from('membros_espaco').select('papel, usuario_id, perfis ( nome )').eq('espaco_id', espacoId),
+    supabase.from('lancamentos').select('tipo, status, descricao, valor_centavos, data, data_competencia')
+      .eq('espaco_id', espacoId).neq('status', 'cancelado').in('tipo', ['receita', 'despesa'])
+      .gte('data_competencia', `${mesAtual()}-01`).lte('data_competencia', `${somarMes(mesAtual(), 11)}-01`),
   ]);
-  const erro = [espR, papelR, contasR, mesR, saldosR, membrosR].find((r) => r.error);
+  const erro = [espR, papelR, contasR, mesR, saldosR, membrosR, anoR].find((r) => r.error);
   if (erro) return telaErro(`Não foi possível abrir este espaço: ${mensagemErro(erro.error)}`);
   let cats;
   try { cats = await carregarCategorias(espacoId); } catch (e) { return telaErro(mensagemErro(e)); }
@@ -266,6 +269,7 @@ async function telaEspaco(espacoId) {
   const saldoTotal = Object.values(saldo).reduce((a, b) => a + b, 0);
 
   const recarregar = () => telaEspaco(espacoId);
+  const painel = montarPainel({ saldoTotal, lancs, anoLancs: anoR.data, cats, mes });
   const valorLinha = (rot, v, classe = '') => el('div', { class: 'linha' }, el('span', { class: 'discreto' }, rot), el('strong', { class: classe }, reais(v)));
 
   const cabecalho = el('div', { class: 'tela' },
@@ -340,11 +344,117 @@ async function telaEspaco(espacoId) {
   );
 
   mostrar(el('section', { class: 'tela' },
-    marca(), cabecalho, navMes, resumo, pendencias,
+    marca(), cabecalho, painel.topo, navMes, resumo, pendencias, painel.categorias,
     (podeEditar || ehDependente) && formLanc,
     el('h2', {}, 'Lançamentos do mês'), lista,
+    painel.meses,
     blocoContas, blocoMembros,
   ));
+}
+
+// ---------- painel ----------
+function montarPainel({ saldoTotal, lancs, anoLancs, cats, mes }) {
+  const hoje = hojeISO(); const mesHoje = mesAtual();
+  const doMesHoje = anoLancs.filter((l) => l.data_competencia.startsWith(mesHoje));
+  const sai = doMesHoje.filter((l) => l.status === 'previsto' && l.tipo === 'despesa').reduce((a, l) => a + l.valor_centavos, 0);
+  const entra = doMesHoje.filter((l) => l.status === 'previsto' && l.tipo === 'receita').reduce((a, l) => a + l.valor_centavos, 0);
+  const fimMes = saldoTotal - sai + entra;
+  const nomeMesHoje = nomeMes(mesHoje).split(' ')[0].toLowerCase();
+
+  const tile = (rotulo, valor, nota, classe = '') => el('div', { class: `cartao kpi ${classe}` },
+    el('span', { class: 'discreto' }, rotulo), el('strong', { class: 'kpi-valor' }, reais(valor)), nota && el('span', { class: 'discreto pequeno-texto' }, nota));
+
+  // próximos vencimentos (15 dias)
+  const limite = new Date(); limite.setDate(limite.getDate() + 15);
+  const limiteISO = limite.toLocaleDateString('sv-SE');
+  const proximos = anoLancs.filter((l) => l.status === 'previsto' && l.tipo === 'despesa' && l.data >= hoje && l.data <= limiteISO)
+    .sort((a, b) => a.data.localeCompare(b.data)).slice(0, 6);
+  const atrasados = anoLancs.filter((l) => l.status === 'previsto' && l.tipo === 'despesa' && l.data < hoje);
+
+  const topo = el('div', { class: 'tela' },
+    el('div', { class: 'kpis' },
+      tile('Saldo hoje', saldoTotal, 'somando as contas'),
+      tile(`Ainda sai em ${nomeMesHoje}`, sai, entra ? `entra ${reais(entra)}` : 'contas previstas'),
+      tile(`Fim de ${nomeMesHoje}`, fimMes, 'saldo previsto', fimMes < 0 ? 'alerta' : ''),
+    ),
+    atrasados.length ? el('p', { class: 'aviso' }, `${atrasados.length} previsão(ões) com data passada ainda sem valor real. Confirme ou cancele na lista do mês.`) : null,
+    el('div', { class: 'cartao' },
+      el('strong', {}, 'Próximos vencimentos (15 dias)'),
+      proximos.length
+        ? el('ul', { class: 'vencimentos' }, proximos.map((l) => el('li', { class: 'linha' },
+            el('span', {}, `${dataCurta(l.data)} · ${l.descricao || 'Sem descrição'}`), el('strong', {}, reais(l.valor_centavos)))))
+        : el('p', { class: 'discreto' }, 'Nada previsto para os próximos 15 dias.'),
+    ),
+  );
+
+  // gastos do mês selecionado por categoria (categoria principal), pago × ainda previsto
+  const principal = Object.fromEntries(cats.map((c) => [c.id, c.rotulo.split(' › ')[0]]));
+  const grupos = {};
+  for (const l of lancs.filter((x) => x.tipo === 'despesa')) {
+    const g = principal[l.categoria_id] || 'Sem categoria';
+    grupos[g] = grupos[g] || { pago: 0, previsto: 0 };
+    if (l.status === 'confirmado') grupos[g].pago += l.valor_centavos; else grupos[g].previsto += l.valor_centavos;
+  }
+  let linhas = Object.entries(grupos).map(([nome, v]) => ({ nome, ...v, total: v.pago + v.previsto })).sort((a, b) => b.total - a.total);
+  if (linhas.length > 7) {
+    const resto = linhas.slice(6);
+    linhas = [...linhas.slice(0, 6), resto.reduce((a, r) => ({ nome: 'Outras', pago: a.pago + r.pago, previsto: a.previsto + r.previsto, total: a.total + r.total }), { nome: 'Outras', pago: 0, previsto: 0, total: 0 })];
+  }
+  const maior = Math.max(1, ...linhas.map((l) => l.total));
+  const categorias = linhas.length ? el('div', { class: 'cartao tela' },
+    el('strong', {}, `Para onde vai o dinheiro em ${nomeMes(mes).split(' ')[0].toLowerCase()}`),
+    el('div', { class: 'legenda' },
+      el('span', {}, el('i', { class: 'amostra saida' }), 'Já pago'),
+      el('span', {}, el('i', { class: 'amostra saida previsto' }), 'Previsto')),
+    el('ul', { class: 'barras' }, linhas.map((l) => el('li', { title: `${l.nome}: pago ${reais(l.pago)} · previsto ${reais(l.previsto)}` },
+      el('div', { class: 'linha' }, el('span', {}, l.nome), el('strong', {}, reais(l.total))),
+      el('div', { class: 'trilho' },
+        l.pago ? el('span', { class: 'seg saida', style: `width:${(l.pago / maior) * 100}%` }) : null,
+        l.previsto ? el('span', { class: 'seg saida previsto', style: `width:${(l.previsto / maior) * 100}%` }) : null),
+    ))),
+  ) : null;
+
+  // próximos 12 meses: entradas × saídas (realizado + previsto)
+  const meses = Array.from({ length: 12 }, (_, i) => somarMes(mesHoje, i));
+  const porMes = meses.map((m) => {
+    const ls = anoLancs.filter((l) => l.data_competencia.startsWith(m));
+    return { m, entra: ls.filter((l) => l.tipo === 'receita').reduce((a, l) => a + l.valor_centavos, 0), sai: ls.filter((l) => l.tipo === 'despesa').reduce((a, l) => a + l.valor_centavos, 0) };
+  });
+  const topoEscala = Math.max(1, ...porMes.flatMap((p) => [p.entra, p.sai]));
+  const W = 340, H = 150, base = 128, larg = W / 12;
+  const abrev = (m) => new Date(Number(m.slice(0, 4)), Number(m.slice(5)) - 1, 1).toLocaleDateString('pt-BR', { month: 'short' }).replace('.', '');
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('class', 'grafico'); svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'Entradas e saídas previstas nos próximos 12 meses');
+  const add = (tag, attrs, texto) => { const n = document.createElementNS(svgNS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); if (texto) n.textContent = texto; svg.append(n); return n; };
+  add('line', { x1: 0, x2: W, y1: base, y2: base, class: 'eixo' });
+  porMes.forEach((p, i) => {
+    const x = i * larg; const bw = (larg - 6) / 2;
+    const hE = (p.entra / topoEscala) * (base - 8), hS = (p.sai / topoEscala) * (base - 8);
+    const g = document.createElementNS(svgNS, 'g'); svg.append(g);
+    const t = document.createElementNS(svgNS, 'title'); t.textContent = `${nomeMes(p.m)}: entra ${reais(p.entra)} · sai ${reais(p.sai)} · sobra ${reais(p.entra - p.sai)}`; g.append(t);
+    const r = (cls, xx, h) => { const n = document.createElementNS(svgNS, 'rect'); Object.entries({ x: xx, y: base - h, width: bw, height: Math.max(h, p.entra || p.sai ? 1 : 0), rx: 2, class: cls }).forEach(([k, v]) => n.setAttribute(k, v)); g.append(n); };
+    r('entrada', x + 2, hE); r('saida', x + 2 + bw + 2, hS);
+    const hit = document.createElementNS(svgNS, 'rect'); Object.entries({ x, y: 0, width: larg, height: base, fill: 'transparent' }).forEach(([k, v]) => hit.setAttribute(k, v)); g.append(hit);
+    add('text', { x: x + larg / 2, y: H - 6, class: 'rotulo', 'text-anchor': 'middle' }, abrev(p.m));
+  });
+  const tabela = el('details', {}, el('summary', {}, 'Ver em tabela'),
+    el('table', { class: 'tabela' },
+      el('thead', {}, el('tr', {}, el('th', {}, 'Mês'), el('th', {}, 'Entra'), el('th', {}, 'Sai'), el('th', {}, 'Sobra'))),
+      el('tbody', {}, porMes.map((p) => el('tr', {}, el('td', {}, abrev(p.m)), el('td', {}, reais(p.entra)), el('td', {}, reais(p.sai)), el('td', { class: p.entra - p.sai < 0 ? 'negativo' : '' }, reais(p.entra - p.sai))))),
+    ));
+  const mesesBloco = el('div', { class: 'cartao tela' },
+    el('strong', {}, 'Próximos 12 meses'),
+    el('p', { class: 'discreto pequeno-texto' }, 'Tudo que já foi lançado ou previsto. Toque numa coluna para ver os valores.'),
+    el('div', { class: 'legenda' }, el('span', {}, el('i', { class: 'amostra entrada' }), 'Entradas'), el('span', {}, el('i', { class: 'amostra saida' }), 'Saídas')),
+    svg, tabela,
+  );
+  svg.addEventListener('click', (e) => { const t = e.target.closest('g')?.querySelector('title'); if (t) dica.textContent = t.textContent; });
+  const dica = el('p', { class: 'pequeno-texto', role: 'status' });
+  mesesBloco.insertBefore(dica, tabela);
+
+  return { topo, categorias, meses: mesesBloco };
 }
 
 function formularioLancamento({ espacoId, contas, cats, podeEditar, ehDependente, aoSalvar }) {
