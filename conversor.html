@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Conversor · Assistente Financeiro</title>
+  <meta name="theme-color" content="#26366d">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main id="app">
+    <section class="tela">
+      <p class="marca"><img class="boneco" src="/icons/boneco.png" alt="">Assistente Financeiro</p>
+      <a id="voltar" class="link" href="/">‹ Voltar ao app</a>
+      <h1>Quanto custa isso?</h1>
+      <p id="aviso" class="discreto pequeno-texto"></p>
+      <div class="cartao tela">
+        <div class="linha"><strong id="titulo">Valor</strong><button id="sentido" type="button" class="secundario pequeno" aria-label="Inverter a conversão"></button></div>
+        <div class="grade-valor">
+          <input id="valor" inputmode="decimal" autocomplete="off" aria-label="Valor para converter" placeholder="0">
+          <select id="moeda" aria-label="Moeda"></select>
+        </div>
+        <strong id="resultado" class="conversao">—</strong>
+        <p id="detalhe" class="discreto pequeno-texto"></p>
+      </div>
+      <details class="cartao">
+        <summary>Usar outra cotação (casa de câmbio, Wise…)</summary>
+        <div class="tela">
+          <label><span>Quanto vale 1 <b id="m2"></b> em reais?</span>
+            <input id="manual" inputmode="decimal" autocomplete="off" placeholder="Ex.: 0,16">
+          </label>
+          <div class="linha">
+            <button id="salvar" type="button">Usar esta cotação</button>
+            <button id="limpar" type="button" class="secundario">Voltar à oficial</button>
+          </div>
+        </div>
+      </details>
+      <p class="discreto pequeno-texto">Funciona sem internet: usa a última cotação baixada. Abra com internet de vez em quando para atualizar.</p>
+    </section>
+  </main>
+  <script type="module" src="/conversor.js"></script>
+</body>
+</html>

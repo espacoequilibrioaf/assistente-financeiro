@@ -1,6 +1,7 @@
 // Assistente Financeiro — app web sem etapa de build.
 // Telas: login por código, início (espaços), espaço (resumo do mês, lançamentos, contas, membros).
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { MOEDAS_CONV, atualizarCotacoes, cotacaoDe } from '/cotacoes.js';
 import { CONFIG } from './config.js';
 
 const supabase = createClient(CONFIG.supabaseUrl, CONFIG.supabaseKey, {
@@ -765,22 +766,16 @@ const MOEDAS = { BRL: 'Real (R$)', THB: 'Baht tailandês (THB)', INR: 'Rúpia in
 const RUBRICAS_VIAGEM = ['Passagens', 'Hospedagem', 'Alimentação', 'Passeios', 'Transporte', 'Compras', 'Seguro e vistos', 'Outros'];
 const cotacoes = {};
 
+// Cotação oficial: baixa da internet e guarda no aparelho; sem internet, usa a última guardada.
 async function buscarCotacao(moeda) {
   if (moeda === 'BRL') return { valor: 1, data: hojeISO() };
   if (cotacoes[moeda]) return cotacoes[moeda];
-  const urls = [
-    `https://api.frankfurter.dev/v1/latest?base=${moeda}&symbols=BRL`,
-    `https://api.frankfurter.app/latest?from=${moeda}&to=BRL`,
-  ];
-  for (const url of urls) {
-    try {
-      const r = await fetch(url);
-      if (!r.ok) continue;
-      const j = await r.json();
-      if (j.rates && j.rates.BRL) { cotacoes[moeda] = { valor: j.rates.BRL, data: j.date }; return cotacoes[moeda]; }
-    } catch { /* tenta a próxima */ }
+  if (await atualizarCotacoes([...new Set([...MOEDAS_CONV, moeda])])) {
+    const c = cotacaoDe(moeda, { aceitarManual: false });
+    if (c) { cotacoes[moeda] = c; return c; }
   }
-  return null;
+  const salva = cotacaoDe(moeda, { aceitarManual: false });
+  return salva ? { ...salva, guardada: true } : null;
 }
 
 function lerNumero(texto) {
@@ -882,12 +877,12 @@ function conversorRapido(moedas) {
     valor.placeholder = paraReal ? `valor em ${moeda.value}` : 'valor em reais';
     const v = lerNumero(valor.value);
     const c = await buscarCotacao(moeda.value);
-    if (!c) { resultado.textContent = 'Sem cotação agora'; detalhe.textContent = 'Verifique a internet e tente de novo.'; return; }
+    if (!c) { resultado.textContent = 'Sem cotação agora'; detalhe.textContent = 'Sem internet e nenhuma cotação guardada ainda.'; return; }
     if (!v) { resultado.textContent = '—'; detalhe.textContent = `1 ${moeda.value} = R$ ${numero(c.valor, 4)} (cotação de ${c.data.split('-').reverse().join('/')})`; return; }
     if (paraReal) {
       const r = Math.round(v * c.valor * 100);
       resultado.textContent = `≈ ${reais(r)}`;
-      detalhe.textContent = `No cartão de crédito brasileiro, com IOF de 3,5%: ≈ ${reais(Math.round(r * 1.035))}. Cotação de ${c.data.split('-').reverse().join('/')}.`;
+      detalhe.textContent = `No cartão de crédito brasileiro, com IOF de 3,5%: ≈ ${reais(Math.round(r * 1.035))}. Cotação de ${c.data.split('-').reverse().join('/')}${c.guardada ? ' (guardada, sem internet)' : ''}.`;
     } else {
       resultado.textContent = `≈ ${numero(v / c.valor)} ${moeda.value}`;
       detalhe.textContent = `1 ${moeda.value} = R$ ${numero(c.valor, 4)}.`;
@@ -900,6 +895,7 @@ function conversorRapido(moedas) {
     el('div', { class: 'linha' }, el('strong', {}, 'Conversor rápido'), sentido),
     el('div', { class: 'grade-valor' }, valor, moeda),
     resultado, detalhe,
+    el('a', { href: `/conversor.html?moeda=${encodeURIComponent(moeda.value)}&voltar=${encodeURIComponent(location.pathname + location.hash)}`, class: 'pequeno-texto' }, 'Abrir conversor em tela cheia (funciona sem internet) ›'),
   );
 }
 

@@ -197,3 +197,5 @@ li.item-compacto.pago .item-valor { color: var(--serie-saida); }
 .ponto.ok { color: var(--serie-saida); font-weight: 700; }
 .etiqueta.mini { font-size: 0.7rem; padding: 1px 7px; margin-left: 6px; vertical-align: middle; }
 .detalhe { padding: 0 0 12px 18px; }
+details.cartao > summary { cursor: pointer; font-weight: 600; color: var(--texto); }
+details.cartao[open] > summary { margin-bottom: 10px; }
