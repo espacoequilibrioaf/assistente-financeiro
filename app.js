@@ -44,6 +44,7 @@ function mensagemErro(erro) {
 
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const reais = (centavos) => brl.format((centavos || 0) / 100);
+const numero = (v, casas = 2) => Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: casas });
 
 function lerValor(texto) {
   // aceita "15", "15,50", "1.234,56", "15.5"
@@ -224,21 +225,23 @@ async function carregarCategorias(espacoId) {
 
 async function telaEspaco(espacoId) {
   const mes = estado.mes;
-  const [espR, papelR, contasR, mesR, saldosR, membrosR, anoR] = await Promise.all([
+  const [espR, papelR, contasR, mesR, saldosR, membrosR, projR, anoR] = await Promise.all([
     supabase.from('espacos').select('id, nome, tipo').eq('id', espacoId).single(),
     supabase.from('membros_espaco').select('papel').eq('espaco_id', espacoId).eq('usuario_id', usuario.id).single(),
     supabase.from('contas').select('id, nome, tipo, saldo_inicial_centavos').eq('espaco_id', espacoId).eq('ativa', true).order('nome'),
     supabase.from('lancamentos')
-      .select('id, tipo, status, descricao, observacao, valor_centavos, valor_previsto_centavos, data, categoria_id, conta_id')
+      .select('id, tipo, status, descricao, observacao, valor_centavos, valor_previsto_centavos, data, categoria_id, conta_id, moeda, valor_original, cotacao, projeto_id, pago_por, transferencia_sentido, transferencia_par_id')
       .eq('espaco_id', espacoId).eq('data_competencia', `${mes}-01`).neq('status', 'cancelado')
       .order('data', { ascending: false }).order('criado_em', { ascending: false }),
-    supabase.from('lancamentos').select('conta_id, tipo, valor_centavos').eq('espaco_id', espacoId).eq('status', 'confirmado'),
+    supabase.from('lancamentos').select('conta_id, tipo, valor_centavos, transferencia_sentido').eq('espaco_id', espacoId).eq('status', 'confirmado'),
     supabase.from('membros_espaco').select('papel, usuario_id, perfis ( nome )').eq('espaco_id', espacoId),
+    supabase.from('projetos').select('id, nome, tipo, data_inicio, data_fim, projeto_rubricas ( valor_previsto_centavos ), lancamentos ( tipo, status, valor_centavos )')
+      .eq('espaco_id', espacoId).eq('ativo', true).order('criado_em', { ascending: false }),
     supabase.from('lancamentos').select('tipo, status, descricao, valor_centavos, data, data_competencia')
       .eq('espaco_id', espacoId).neq('status', 'cancelado').in('tipo', ['receita', 'despesa'])
       .gte('data_competencia', `${mesAtual()}-01`).lte('data_competencia', `${somarMes(mesAtual(), 11)}-01`),
   ]);
-  const erro = [espR, papelR, contasR, mesR, saldosR, membrosR, anoR].find((r) => r.error);
+  const erro = [espR, papelR, contasR, mesR, saldosR, membrosR, projR, anoR].find((r) => r.error);
   if (erro) return telaErro(`Não foi possível abrir este espaço: ${mensagemErro(erro.error)}`);
   let cats;
   try { cats = await carregarCategorias(espacoId); } catch (e) { return telaErro(mensagemErro(e)); }
@@ -260,12 +263,7 @@ async function telaEspaco(espacoId) {
   const aReceber = soma((l) => l.status === 'previsto' && l.tipo === 'receita');
 
   // saldos das contas (saldo inicial + receitas − despesas confirmadas)
-  const saldo = Object.fromEntries(contas.map((c) => [c.id, c.saldo_inicial_centavos]));
-  for (const l of saldosR.data) {
-    if (!(l.conta_id in saldo)) continue;
-    if (l.tipo === 'receita') saldo[l.conta_id] += l.valor_centavos;
-    if (l.tipo === 'despesa') saldo[l.conta_id] -= l.valor_centavos;
-  }
+  const saldo = calcularSaldos(contas, saldosR.data);
   const saldoTotal = Object.values(saldo).reduce((a, b) => a + b, 0);
 
   const recarregar = () => telaEspaco(espacoId);
@@ -332,6 +330,7 @@ async function telaEspaco(espacoId) {
           ))))
       : el('p', { class: 'discreto' }, 'Cadastre a primeira conta (banco, dinheiro ou carteira digital) com o saldo de hoje. O saldo inicial fica na conta, e não como receita, para não inflar as receitas do mês.'),
     podeEditar && formularioConta(espacoId, recarregar),
+    podeEditar && contas.length >= 2 && formularioTransferencia(contas, recarregar),
     el('p', { class: 'discreto' }, 'Cartões de crédito, faturas e parcelas chegam na próxima etapa.'),
   );
 
@@ -348,8 +347,21 @@ async function telaEspaco(espacoId) {
     (podeEditar || ehDependente) && formLanc,
     el('h2', {}, 'Lançamentos do mês'), lista,
     painel.meses,
+    blocoProjetos(espacoId, projR.data, podeEditar),
     blocoContas, blocoMembros,
   ));
+}
+
+function calcularSaldos(contas, movimentos) {
+  const saldo = Object.fromEntries(contas.map((c) => [c.id, c.saldo_inicial_centavos]));
+  for (const l of movimentos) {
+    if (!(l.conta_id in saldo)) continue;
+    const entra = l.tipo === 'receita' || (l.tipo === 'transferencia' && l.transferencia_sentido === 'entrada');
+    const sai = l.tipo === 'despesa' || (l.tipo === 'transferencia' && l.transferencia_sentido === 'saida');
+    if (entra) saldo[l.conta_id] += l.valor_centavos;
+    if (sai) saldo[l.conta_id] -= l.valor_centavos;
+  }
+  return saldo;
 }
 
 // ---------- painel ----------
@@ -421,7 +433,7 @@ function montarPainel({ saldoTotal, lancs, anoLancs, cats, mes }) {
     return { m, entra: ls.filter((l) => l.tipo === 'receita').reduce((a, l) => a + l.valor_centavos, 0), sai: ls.filter((l) => l.tipo === 'despesa').reduce((a, l) => a + l.valor_centavos, 0) };
   });
   const topoEscala = Math.max(1, ...porMes.flatMap((p) => [p.entra, p.sai]));
-  const W = 340, H = 150, base = 128, larg = W / 12;
+  const W = 340, H = 164, base = 124, larg = W / 12;
   const abrev = (m) => new Date(Number(m.slice(0, 4)), Number(m.slice(5)) - 1, 1).toLocaleDateString('pt-BR', { month: 'short' }).replace('.', '');
   const svgNS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(svgNS, 'svg');
@@ -437,12 +449,16 @@ function montarPainel({ saldoTotal, lancs, anoLancs, cats, mes }) {
     const r = (cls, xx, h) => { const n = document.createElementNS(svgNS, 'rect'); Object.entries({ x: xx, y: base - h, width: bw, height: Math.max(h, p.entra || p.sai ? 1 : 0), rx: 2, class: cls }).forEach(([k, v]) => n.setAttribute(k, v)); g.append(n); };
     r('entrada', x + 2, hE); r('saida', x + 2 + bw + 2, hS);
     const hit = document.createElementNS(svgNS, 'rect'); Object.entries({ x, y: 0, width: larg, height: base, fill: 'transparent' }).forEach(([k, v]) => hit.setAttribute(k, v)); g.append(hit);
-    add('text', { x: x + larg / 2, y: H - 6, class: 'rotulo', 'text-anchor': 'middle' }, abrev(p.m));
+    add('text', { x: x + larg / 2, y: base + 14, class: 'rotulo', 'text-anchor': 'middle' }, abrev(p.m));
+    if (i === 0 || p.m.endsWith('-01')) {
+      add('text', { x: x + 2, y: base + 30, class: 'rotulo ano' }, p.m.slice(0, 4));
+      if (i > 0) add('line', { x1: x, x2: x, y1: 4, y2: base + 20, class: 'divisa-ano' });
+    }
   });
   const tabela = el('details', {}, el('summary', {}, 'Ver em tabela'),
     el('table', { class: 'tabela' },
       el('thead', {}, el('tr', {}, el('th', {}, 'Mês'), el('th', {}, 'Entra'), el('th', {}, 'Sai'), el('th', {}, 'Sobra'))),
-      el('tbody', {}, porMes.map((p) => el('tr', {}, el('td', {}, abrev(p.m)), el('td', {}, reais(p.entra)), el('td', {}, reais(p.sai)), el('td', { class: p.entra - p.sai < 0 ? 'negativo' : '' }, reais(p.entra - p.sai))))),
+      el('tbody', {}, porMes.map((p) => el('tr', {}, el('td', {}, `${abrev(p.m)}/${p.m.slice(2, 4)}`), el('td', {}, reais(p.entra)), el('td', {}, reais(p.sai)), el('td', { class: p.entra - p.sai < 0 ? 'negativo' : '' }, reais(p.entra - p.sai))))),
     ));
   const mesesBloco = el('div', { class: 'cartao tela' },
     el('strong', {}, 'Próximos 12 meses'),
@@ -539,8 +555,10 @@ function formularioLancamento({ espacoId, contas, cats, podeEditar, ehDependente
   return el('div', { class: 'tela' }, abrir, form);
 }
 
-function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar }) {
-  const sinal = l.tipo === 'receita' ? 'positivo' : 'negativo';
+function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, nomePessoa = {}, nomeRubrica = {} }) {
+  const ehTransf = l.tipo === 'transferencia';
+  const ids = ehTransf && l.transferencia_par_id ? [l.id, l.transferencia_par_id] : [l.id];
+  const sinal = ehTransf ? '' : (l.tipo === 'receita' ? 'positivo' : 'negativo');
   const etiquetas = [];
   if (l.status === 'previsto') etiquetas.push(el('span', { class: 'etiqueta ouro' }, 'Previsto'));
   if (l.status === 'pendente_confirmacao') etiquetas.push(el('span', { class: 'etiqueta ouro' }, 'Aguardando aprovação'));
@@ -558,15 +576,17 @@ function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar }) 
       const centavos = lerValor(real.value);
       if (!centavos) { erro.textContent = 'Valor inválido.'; return; }
       if (!conta.value) { erro.textContent = 'Cadastre uma conta primeiro.'; return; }
-      const { error } = await supabase.from('lancamentos').update({ status: 'confirmado', valor_centavos: centavos, conta_id: conta.value }).eq('id', l.id);
+      const { error } = ehTransf
+        ? await supabase.from('lancamentos').update({ status: 'confirmado', valor_centavos: centavos }).in('id', ids)
+        : await supabase.from('lancamentos').update({ status: 'confirmado', valor_centavos: centavos, conta_id: conta.value }).eq('id', l.id);
       if (error) { erro.textContent = mensagemErro(error); return; }
       aoMudar();
-    } }, real, contas.length ? conta : null, el('button', { type: 'submit', class: 'pequeno' }, l.status === 'previsto' ? 'Confirmar valor real' : 'Aprovar')));
+    } }, real, contas.length && !ehTransf ? conta : null, el('button', { type: 'submit', class: 'pequeno' }, l.status === 'previsto' ? 'Confirmar valor real' : 'Aprovar')));
   }
   if (podeEditar) {
     acoes.append(el('button', { class: 'link pequeno', onclick: async () => {
       if (!confirm('Cancelar este lançamento? Ele sai das contas, mas continua no histórico.')) return;
-      const { error } = await supabase.from('lancamentos').update({ status: 'cancelado' }).eq('id', l.id);
+      const { error } = await supabase.from('lancamentos').update({ status: 'cancelado' }).in('id', ids);
       if (error) { erro.textContent = mensagemErro(error); return; }
       aoMudar();
     } }, 'Cancelar lançamento'));
@@ -574,10 +594,13 @@ function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar }) 
 
   return el('li', { class: 'cartao' },
     el('div', { class: 'linha' },
-      el('strong', {}, l.descricao || nomeCat[l.categoria_id] || (l.tipo === 'receita' ? 'Receita' : 'Despesa')),
-      el('strong', { class: sinal }, (l.tipo === 'despesa' ? '− ' : '+ ') + reais(l.valor_centavos)),
+      el('strong', {}, l.descricao || nomeCat[l.categoria_id] || (ehTransf ? 'Transferência' : l.tipo === 'receita' ? 'Receita' : 'Despesa')),
+      el('strong', { class: sinal }, (ehTransf ? (l.transferencia_sentido === 'saida' ? '↗ ' : '↘ ') : l.tipo === 'despesa' ? '− ' : '+ ') + reais(l.valor_centavos)),
     ),
-    el('p', { class: 'discreto' }, [dataCurta(l.data), nomeCat[l.categoria_id], nomeConta[l.conta_id]].filter(Boolean).join(' · ')),
+    el('p', { class: 'discreto' }, [dataCurta(l.data), ehTransf ? `Transferência · ${l.transferencia_sentido === 'saida' ? 'saiu de' : 'entrou em'} ${nomeConta[l.conta_id] || 'outra conta'}` : nomeCat[l.categoria_id], ehTransf ? null : nomeConta[l.conta_id]].filter(Boolean).join(' · ')),
+    l.moeda && l.moeda !== 'BRL' && l.valor_original ? el('p', { class: 'discreto' }, `${numero(l.valor_original)} ${l.moeda} · cotação R$ ${numero(l.cotacao, 4)}`) : null,
+    (l.rubrica_id && nomeRubrica[l.rubrica_id]) || (l.pago_por && nomePessoa[l.pago_por])
+      ? el('p', { class: 'discreto' }, [nomeRubrica[l.rubrica_id], l.pago_por && nomePessoa[l.pago_por] && `pago por ${nomePessoa[l.pago_por]}`].filter(Boolean).join(' · ')) : null,
     l.observacao ? el('p', { class: 'observacao' }, l.observacao) : null,
     etiquetas.length ? el('div', { class: 'acoes' }, etiquetas) : null,
     diferenca, acoes, erro,
@@ -609,6 +632,35 @@ function formularioConta(espacoId, aoSalvar) {
   return el('div', { class: 'tela' }, el('button', { class: 'secundario', onclick: () => { form.classList.toggle('escondido'); nome.focus(); } }, '+ Nova conta'), form);
 }
 
+function formularioTransferencia(contas, aoSalvar) {
+  const de = el('select', {}, contas.map((c) => el('option', { value: c.id }, c.nome)));
+  const para = el('select', {}, contas.map((c, i) => el('option', { value: c.id, selected: i === 1 }, c.nome)));
+  const valor = el('input', { inputmode: 'decimal', required: true, placeholder: '0,00' });
+  const data = el('input', { type: 'date', required: true, value: hojeISO() });
+  const desc = el('input', { maxlength: '120', placeholder: 'Ex.: dinheiro para a viagem, compra de baht' });
+  const prev = el('input', { type: 'checkbox' });
+  const erro = el('p', { class: 'erro', role: 'alert' });
+  const form = el('form', { class: 'cartao tela escondido', onsubmit: async (e) => {
+    e.preventDefault(); erro.textContent = '';
+    const v = lerValor(valor.value);
+    if (!v) { erro.textContent = 'Digite o valor.'; return; }
+    if (de.value === para.value) { erro.textContent = 'Escolha contas diferentes.'; return; }
+    const { error } = await supabase.rpc('criar_transferencia', {
+      p_conta_origem: de.value, p_conta_destino: para.value, p_valor_centavos: v, p_data: data.value,
+      p_previsto: prev.checked, p_descricao: desc.value.trim() || 'Transferência', p_observacao: null,
+    });
+    if (error) { erro.textContent = mensagemErro(error); return; }
+    aoSalvar();
+  } },
+    el('p', { class: 'discreto' }, 'Dinheiro que muda de lugar entre contas suas (ex.: do banco para a Wise, ou para a compra de moeda em espécie). Não conta como gasto nem como receita.'),
+    el('label', {}, 'Sai de', de), el('label', {}, 'Entra em', para),
+    el('label', {}, 'Valor em reais', valor), el('label', {}, 'Data', data), el('label', {}, 'Descrição', desc),
+    el('label', { class: 'marcar' }, prev, 'É só uma previsão'),
+    erro, el('button', { type: 'submit' }, 'Transferir'),
+  );
+  return el('div', { class: 'tela' }, el('button', { class: 'secundario', onclick: () => { form.classList.toggle('escondido'); valor.focus(); } }, '⇄ Transferir entre contas'), form);
+}
+
 function formularioConvite(espacoId, aoSalvar) {
   const email = el('input', { type: 'email', required: true, placeholder: 'e-mail que a pessoa usa no app' });
   const papel = el('select', {},
@@ -630,6 +682,292 @@ function formularioConvite(espacoId, aoSalvar) {
   return el('div', { class: 'tela' }, el('button', { class: 'secundario', onclick: () => { form.classList.toggle('escondido'); email.focus(); } }, '+ Adicionar pessoa'), form);
 }
 
+// ---------- viagens e projetos ----------
+const MOEDAS = { BRL: 'Real (R$)', THB: 'Baht tailandês (THB)', INR: 'Rúpia indiana (INR)', USD: 'Dólar (US$)', EUR: 'Euro (€)' };
+const RUBRICAS_VIAGEM = ['Passagens', 'Hospedagem', 'Alimentação', 'Passeios', 'Transporte', 'Compras', 'Seguro e vistos', 'Outros'];
+const cotacoes = {};
+
+async function buscarCotacao(moeda) {
+  if (moeda === 'BRL') return { valor: 1, data: hojeISO() };
+  if (cotacoes[moeda]) return cotacoes[moeda];
+  const urls = [
+    `https://api.frankfurter.dev/v1/latest?base=${moeda}&symbols=BRL`,
+    `https://api.frankfurter.app/latest?from=${moeda}&to=BRL`,
+  ];
+  for (const url of urls) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) continue;
+      const j = await r.json();
+      if (j.rates && j.rates.BRL) { cotacoes[moeda] = { valor: j.rates.BRL, data: j.date }; return cotacoes[moeda]; }
+    } catch { /* tenta a próxima */ }
+  }
+  return null;
+}
+
+function lerNumero(texto) {
+  let t = String(texto).trim().replace(/[^\d.,]/g, '');
+  if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function diasEntre(a, b) { return Math.round((Date.parse(b) - Date.parse(a)) / 864e5); }
+
+function blocoProjetos(espacoId, projetos, podeEditar) {
+  const nome = el('input', { required: true, maxlength: '80', placeholder: 'Ex.: Tailândia e Índia 2026' });
+  const tipo = el('select', {},
+    el('option', { value: 'viagem' }, 'Viagem'), el('option', { value: 'evento' }, 'Passeio ou evento'),
+    el('option', { value: 'reforma' }, 'Reforma'), el('option', { value: 'outro' }, 'Outro'));
+  const inicio = el('input', { type: 'date' });
+  const fim = el('input', { type: 'date' });
+  const marcas = ['THB', 'INR', 'USD', 'EUR'].map((m) => {
+    const cb = el('input', { type: 'checkbox', value: m, checked: m === 'THB' || m === 'INR' });
+    return { m, cb, rotulo: el('label', { class: 'marcar' }, cb, MOEDAS[m]) };
+  });
+  const erro = el('p', { class: 'erro', role: 'alert' });
+  const form = el('form', { class: 'cartao tela escondido', onsubmit: async (e) => {
+    e.preventDefault(); erro.textContent = '';
+    if (inicio.value && fim.value && fim.value < inicio.value) { erro.textContent = 'A volta precisa ser depois da ida.'; return; }
+    const moedas = ['BRL', ...marcas.filter((x) => x.cb.checked).map((x) => x.m)];
+    const { data: proj, error } = await supabase.from('projetos').insert({
+      espaco_id: espacoId, nome: nome.value.trim(), tipo: tipo.value,
+      data_inicio: inicio.value || null, data_fim: fim.value || null, moedas,
+    }).select('id').single();
+    if (error) { erro.textContent = mensagemErro(error); return; }
+    const itens = tipo.value === 'viagem' ? RUBRICAS_VIAGEM : ['Gastos'];
+    const { error: e2 } = await supabase.from('projeto_rubricas')
+      .insert(itens.map((n, i) => ({ espaco_id: espacoId, projeto_id: proj.id, nome: n, ordem: i })));
+    if (e2) { erro.textContent = mensagemErro(e2); return; }
+    location.hash = `#/projeto/${proj.id}`;
+  } },
+    el('strong', {}, 'Nova viagem ou projeto'),
+    el('label', {}, 'Nome', nome),
+    el('label', {}, 'Tipo', tipo),
+    el('div', { class: 'grade2' }, el('label', {}, 'Ida / início', inicio), el('label', {}, 'Volta / fim', fim)),
+    el('p', { class: 'discreto' }, 'Moedas que vão usar (o real já está incluído):'),
+    marcas.map((x) => x.rotulo),
+    erro, el('button', { type: 'submit' }, 'Criar'),
+  );
+
+  const lista = projetos.length ? el('ul', { class: 'lista' }, projetos.map((p) => {
+    const orc = p.projeto_rubricas.reduce((a, r) => a + r.valor_previsto_centavos, 0);
+    const gasto = p.lancamentos.filter((l) => l.tipo === 'despesa' && l.status !== 'cancelado').reduce((a, l) => a + l.valor_centavos, 0);
+    const datas = p.data_inicio ? `${dataCurta(p.data_inicio)}${p.data_fim ? ` a ${dataCurta(p.data_fim)}` : ''}` : '';
+    return el('li', {}, el('a', { class: 'cartao clicavel', href: `#/projeto/${p.id}` },
+      el('div', { class: 'linha' }, el('strong', {}, p.nome), datas && el('span', { class: 'etiqueta' }, datas)),
+      el('div', { class: 'linha' }, el('span', { class: 'discreto' }, orc ? `Orçamento ${reais(orc)}` : 'Sem orçamento ainda'), el('strong', {}, reais(gasto))),
+      orc ? el('div', { class: 'trilho' }, el('span', { class: 'seg saida', style: `width:${Math.min(100, (gasto / orc) * 100)}%` })) : null,
+    ));
+  })) : el('p', { class: 'discreto' }, 'Crie uma viagem, passeio ou evento para acompanhar o orçamento separado do dia a dia.');
+
+  return el('div', { class: 'tela' },
+    el('h2', {}, 'Viagens e projetos'), lista,
+    podeEditar && el('button', { class: 'secundario', onclick: () => { form.classList.toggle('escondido'); nome.focus(); } }, '+ Nova viagem ou projeto'),
+    podeEditar && form,
+  );
+}
+
+async function telaProjeto(projetoId) {
+  const pR = await supabase.from('projetos').select('*').eq('id', projetoId).single();
+  if (pR.error) return telaErro(`Não foi possível abrir: ${mensagemErro(pR.error)}`);
+  const proj = pR.data; const espacoId = proj.espaco_id;
+  const [espR, papelR, rubR, lancR, contasR, membrosR, movR] = await Promise.all([
+    supabase.from('espacos').select('id, nome, tipo').eq('id', espacoId).single(),
+    supabase.from('membros_espaco').select('papel').eq('espaco_id', espacoId).eq('usuario_id', usuario.id).single(),
+    supabase.from('projeto_rubricas').select('id, nome, valor_previsto_centavos, ordem').eq('projeto_id', projetoId).order('ordem'),
+    supabase.from('lancamentos')
+      .select('id, tipo, status, descricao, observacao, valor_centavos, valor_previsto_centavos, data, categoria_id, conta_id, moeda, valor_original, cotacao, rubrica_id, pago_por')
+      .eq('projeto_id', projetoId).neq('status', 'cancelado').order('data', { ascending: false }).order('criado_em', { ascending: false }),
+    supabase.from('contas').select('id, nome, tipo, saldo_inicial_centavos').eq('espaco_id', espacoId).eq('ativa', true).order('nome'),
+    supabase.from('membros_espaco').select('usuario_id, perfis ( nome )').eq('espaco_id', espacoId),
+    supabase.from('lancamentos').select('conta_id, tipo, valor_centavos, transferencia_sentido').eq('espaco_id', espacoId).eq('status', 'confirmado'),
+  ]);
+  const falha = [espR, papelR, rubR, lancR, contasR, membrosR, movR].find((r) => r.error);
+  if (falha) return telaErro(`Não foi possível abrir: ${mensagemErro(falha.error)}`);
+  let cats; try { cats = await carregarCategorias(espacoId); } catch (e) { return telaErro(mensagemErro(e)); }
+
+  const papel = papelR.data.papel; const podeEditar = papel === 'dono' || papel === 'editor';
+  const rubricas = rubR.data; const lancs = lancR.data; const contas = contasR.data;
+  const nomePessoa = Object.fromEntries(membrosR.data.map((m) => [m.usuario_id, (m.perfis && m.perfis.nome) || 'Sem nome']));
+  const nomeRubrica = Object.fromEntries(rubricas.map((r) => [r.id, r.nome]));
+  const nomeConta = Object.fromEntries(contas.map((c) => [c.id, c.nome]));
+  const nomeCat = Object.fromEntries(cats.map((c) => [c.id, c.rotulo]));
+  const catViagem = (cats.find((c) => c.rotulo === 'Lazer › Viagens') || {}).id || null;
+  const recarregar = () => telaProjeto(projetoId);
+
+  const despesas = lancs.filter((l) => l.tipo === 'despesa');
+  const orcamento = rubricas.reduce((a, r) => a + r.valor_previsto_centavos, 0);
+  const gasto = despesas.filter((l) => l.status === 'confirmado').reduce((a, l) => a + l.valor_centavos, 0);
+  const aPagar = despesas.filter((l) => l.status !== 'confirmado').reduce((a, l) => a + l.valor_centavos, 0);
+  const sobra = orcamento - gasto - aPagar;
+
+  // dias da viagem
+  const hoje = hojeISO();
+  let infoDias = null; let porDia = null;
+  if (proj.data_inicio && proj.data_fim) {
+    const total = diasEntre(proj.data_inicio, proj.data_fim) + 1;
+    if (hoje < proj.data_inicio) {
+      infoDias = `Faltam ${diasEntre(hoje, proj.data_inicio)} dias para começar · ${total} dias no total`;
+      porDia = orcamento ? Math.max(0, Math.floor((orcamento - gasto - aPagar) / total)) : null;
+    } else if (hoje <= proj.data_fim) {
+      const decorridos = diasEntre(proj.data_inicio, hoje) + 1; const restantes = total - decorridos + 1;
+      const noPeriodo = despesas.filter((l) => l.status === 'confirmado' && l.data >= proj.data_inicio && l.data <= hoje).reduce((a, l) => a + l.valor_centavos, 0);
+      infoDias = `Dia ${decorridos} de ${total} · média de ${reais(Math.round(noPeriodo / decorridos))} por dia até agora`;
+      porDia = orcamento ? Math.max(0, Math.floor(sobra / restantes)) : null;
+    } else {
+      infoDias = `Encerrada · ${total} dias`;
+    }
+  }
+
+  const tile = (rotulo, valor, classe = '') => el('div', { class: `cartao kpi ${classe}` }, el('span', { class: 'discreto' }, rotulo), el('strong', { class: 'kpi-valor' }, reais(valor)));
+  const resumo = el('div', { class: 'tela' },
+    el('div', { class: 'kpis' },
+      tile('Orçamento', orcamento), tile('Já gasto', gasto), tile('Ainda sobra', sobra, sobra < 0 ? 'alerta' : '')),
+    aPagar ? el('p', { class: 'discreto' }, `Previsto a pagar (reservas etc.): ${reais(aPagar)}`) : null,
+    infoDias && el('p', { class: 'discreto' }, infoDias),
+    porDia != null && el('p', { class: 'aviso' }, `Para caber no orçamento: até ${reais(porDia)} por dia.`),
+  );
+
+  // itens do orçamento
+  const usoRubrica = (id) => despesas.filter((l) => l.rubrica_id === id).reduce((a, l) => a + l.valor_centavos, 0);
+  const maiorRub = Math.max(1, ...rubricas.map((r) => Math.max(r.valor_previsto_centavos, usoRubrica(r.id))));
+  const blocoRubricas = el('div', { class: 'cartao tela' },
+    el('strong', {}, 'Orçamento por item'),
+    el('div', { class: 'legenda' }, el('span', {}, el('i', { class: 'amostra saida' }), 'Gasto'), el('span', {}, el('i', { class: 'amostra saida previsto' }), 'Orçado')),
+    el('ul', { class: 'barras' }, rubricas.map((r) => {
+      const usado = usoRubrica(r.id);
+      return el('li', {},
+        el('div', { class: 'linha' }, el('span', {}, r.nome),
+          el('span', {}, el('strong', { class: usado > r.valor_previsto_centavos && r.valor_previsto_centavos ? 'negativo' : '' }, reais(usado)), ` de ${reais(r.valor_previsto_centavos)}`)),
+        el('div', { class: 'trilho fundo' },
+          el('span', { class: 'seg saida', style: `width:${(usado / maiorRub) * 100}%` }),
+          r.valor_previsto_centavos > usado ? el('span', { class: 'seg saida previsto', style: `width:${((r.valor_previsto_centavos - usado) / maiorRub) * 100}%` }) : null),
+        podeEditar && el('button', { class: 'link pequeno', onclick: async () => {
+          const t = prompt(`Quanto vocês querem gastar com "${r.nome}"? (R$)`, (r.valor_previsto_centavos / 100).toFixed(2).replace('.', ','));
+          if (t == null) return;
+          const v = t.trim() === '0' ? 0 : lerValor(t); if (v === null) { alert('Valor inválido.'); return; }
+          const { error } = await supabase.from('projeto_rubricas').update({ valor_previsto_centavos: v }).eq('id', r.id);
+          if (error) { alert(mensagemErro(error)); return; } recarregar();
+        } }, 'Definir valor'),
+      );
+    })),
+    podeEditar && el('button', { class: 'link', onclick: async () => {
+      const n = (prompt('Nome do novo item (ex.: Massagens, Ingressos):') || '').trim(); if (!n) return;
+      const { error } = await supabase.from('projeto_rubricas').insert({ espaco_id: espacoId, projeto_id: projetoId, nome: n, ordem: rubricas.length });
+      if (error) { alert(mensagemErro(error)); return; } recarregar();
+    } }, '+ Item no orçamento'),
+  );
+
+  // dinheiro para a viagem: carteiras digitais (ex.: Wise) e dinheiro em espécie
+  const saldos = calcularSaldos(contas, movR.data);
+  const contasViagem = contas.filter((c) => c.tipo === 'carteira_digital' || c.tipo === 'dinheiro');
+  const blocoDinheiro = el('div', { class: 'cartao tela' },
+    el('div', { class: 'linha' }, el('strong', {}, 'Dinheiro para a viagem'), el('strong', {}, reais(contasViagem.reduce((a, c) => a + saldos[c.id], 0)))),
+    contasViagem.length
+      ? contasViagem.map((c) => el('div', { class: 'linha' }, el('span', {}, c.nome), el('strong', {}, reais(saldos[c.id]))))
+      : el('p', { class: 'discreto' }, `Cadastre no espaço “${espR.data.nome}” uma conta “Wise” (tipo Carteira digital) e uma “Dinheiro em espécie” (tipo Dinheiro). Depois use “⇄ Transferir entre contas” para registrar o dinheiro colocado nelas.`),
+    contasViagem.length ? el('p', { class: 'discreto pequeno-texto' }, 'Valores em reais. Gastos pagos por essas contas descontam daqui. Se o saldo real da Wise ficar diferente por causa do câmbio, use “Ajustar saldo” na conta.') : null,
+    el('a', { class: 'link', href: `#/espaco/${espacoId}` }, 'Ir para as contas do espaço'),
+  );
+
+  // quem pagou
+  const porPessoa = {};
+  despesas.filter((l) => l.status === 'confirmado' && l.pago_por).forEach((l) => { porPessoa[l.pago_por] = (porPessoa[l.pago_por] || 0) + l.valor_centavos; });
+  const blocoPessoas = Object.keys(porPessoa).length > 0 && el('div', { class: 'cartao tela' },
+    el('strong', {}, 'Quem pagou'),
+    Object.entries(porPessoa).map(([id, v]) => el('div', { class: 'linha' }, el('span', {}, nomePessoa[id] || 'Alguém'), el('strong', {}, reais(v)))),
+  );
+
+  // formulário de gasto da viagem
+  const valor = el('input', { inputmode: 'decimal', required: true, placeholder: '0,00', autocomplete: 'off' });
+  const moeda = el('select', {}, (proj.moedas || ['BRL']).map((m) => el('option', { value: m }, m)));
+  const cot = el('input', { inputmode: 'decimal', placeholder: 'R$ por 1 unidade' });
+  const previa = el('p', { class: 'discreto', role: 'status' });
+  const desc = el('input', { maxlength: '120', placeholder: 'Ex.: jantar, tuk-tuk, templo' });
+  const data = el('input', { type: 'date', required: true, value: hoje });
+  const rub = el('select', {}, el('option', { value: '' }, 'Escolha o item…'), rubricas.map((r) => el('option', { value: r.id }, r.nome)));
+  const ordemConta = (c) => (c.tipo === 'carteira_digital' ? 0 : c.tipo === 'dinheiro' ? 1 : 2);
+  const conta = el('select', {}, [...contas].sort((a, b) => ordemConta(a) - ordemConta(b)).map((c) => el('option', { value: c.id }, c.nome)));
+  const pagador = el('select', {}, Object.entries(nomePessoa).map(([id, n]) => el('option', { value: id, selected: id === usuario.id }, n)));
+  const prev = el('input', { type: 'checkbox' });
+  const obs = el('textarea', { rows: '2', maxlength: '500', placeholder: 'Opcional' });
+  const erro = el('p', { class: 'erro', role: 'alert' });
+  const blocoCot = el('label', { class: 'escondido' }, 'Cotação (R$ por 1)', cot);
+
+  const atualizarPrevia = () => {
+    const v = lerNumero(valor.value); const c = moeda.value === 'BRL' ? 1 : lerNumero(cot.value);
+    previa.textContent = v && c ? `≈ ${reais(Math.round(v * c * 100))}` : '';
+  };
+  const aoTrocarMoeda = async () => {
+    if (moeda.value === 'BRL') { blocoCot.classList.add('escondido'); atualizarPrevia(); return; }
+    blocoCot.classList.remove('escondido');
+    cot.placeholder = 'Buscando cotação…';
+    const c = await buscarCotacao(moeda.value);
+    if (c) { cot.value = String(c.valor.toFixed(4)).replace('.', ','); cot.placeholder = 'R$ por 1 unidade'; previa.dataset.fonte = `cotação de ${c.data}`; }
+    else { cot.placeholder = 'Digite a cotação'; }
+    atualizarPrevia();
+  };
+  moeda.addEventListener('change', aoTrocarMoeda);
+  valor.addEventListener('input', atualizarPrevia); cot.addEventListener('input', atualizarPrevia);
+
+  const botao = el('button', { type: 'submit' }, 'Salvar gasto');
+  const form = el('form', { class: 'cartao tela escondido', onsubmit: async (e) => {
+    e.preventDefault(); erro.textContent = '';
+    const v = lerNumero(valor.value); const c = moeda.value === 'BRL' ? 1 : lerNumero(cot.value);
+    if (!v) { erro.textContent = 'Digite o valor.'; return; }
+    if (!c) { erro.textContent = 'Digite a cotação.'; return; }
+    const status = prev.checked ? 'previsto' : 'confirmado';
+    if (status === 'confirmado' && !conta.value) { erro.textContent = 'Cadastre uma conta neste espaço, ou marque como previsão.'; return; }
+    const centavos = Math.round(v * c * 100);
+    botao.disabled = true;
+    const { error } = await supabase.from('lancamentos').insert({
+      espaco_id: espacoId, tipo: 'despesa', status,
+      descricao: desc.value.trim(), valor_centavos: centavos, valor_previsto_centavos: status === 'previsto' ? centavos : null,
+      data: data.value, data_competencia: competencia(data.value),
+      categoria_id: catViagem, conta_id: conta.value || null,
+      projeto_id: projetoId, rubrica_id: rub.value || null,
+      moeda: moeda.value, valor_original: moeda.value === 'BRL' ? null : v, cotacao: moeda.value === 'BRL' ? null : c,
+      pago_por: pagador.value || usuario.id, observacao: obs.value.trim() || null, origem: 'app',
+    });
+    botao.disabled = false;
+    if (error) { erro.textContent = mensagemErro(error); return; }
+    recarregar();
+  } },
+    el('div', { class: 'grade-valor' }, el('label', {}, 'Valor', valor), el('label', {}, 'Moeda', moeda)),
+    blocoCot, previa,
+    el('label', {}, 'Descrição', desc),
+    el('label', {}, 'Data', data),
+    el('label', {}, 'Item do orçamento', rub),
+    contas.length ? el('label', {}, 'Conta ou cartão', conta) : el('p', { class: 'discreto' }, 'Este espaço ainda não tem conta; o gasto pode ficar como previsão.'),
+    el('label', {}, 'Quem pagou', pagador),
+    el('label', { class: 'marcar' }, prev, 'É só uma previsão (reserva, ainda não pago)'),
+    el('label', {}, 'Observação', obs),
+    erro, botao,
+  );
+  if ((proj.moedas || []).length > 1) {
+    const local = proj.moedas.find((m) => m !== 'BRL');
+    moeda.value = local; aoTrocarMoeda();
+  }
+
+  const datas = proj.data_inicio ? `${dataCurta(proj.data_inicio)}${proj.data_fim ? ` a ${dataCurta(proj.data_fim)}` : ''}` : null;
+  mostrar(el('section', { class: 'tela' },
+    marca(),
+    el('a', { class: 'link', href: `#/espaco/${espacoId}` }, `‹ ${espR.data.nome}`),
+    el('div', { class: 'linha' }, el('h1', {}, proj.nome), datas && el('span', { class: 'etiqueta' }, datas)),
+    resumo,
+    blocoDinheiro,
+    podeEditar && el('button', { onclick: () => { form.classList.toggle('escondido'); valor.focus(); } }, '+ Gasto da viagem'),
+    podeEditar && form,
+    blocoRubricas,
+    blocoPessoas,
+    el('h2', {}, 'Gastos'),
+    lancs.length ? el('ul', { class: 'lista' }, lancs.map((l) => itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar: recarregar, nomePessoa, nomeRubrica })))
+      : el('p', { class: 'discreto' }, 'Nenhum gasto ainda. As reservas já pagas (passagem, hotel) podem entrar aqui também.'),
+    el('p', { class: 'discreto' }, 'Os gastos da viagem também aparecem no mês do espaço, na categoria Lazer › Viagens. Quando a fatura do cartão chegar, use “Confirmar valor real” para acertar o valor em reais com IOF.'),
+  ));
+}
+
 // ---------- roteamento ----------
 async function rotear() {
   const { data: { session } } = await supabase.auth.getSession();
@@ -642,6 +980,8 @@ async function rotear() {
   if (!usuario.nome) return telaNome();
   const m = location.hash.match(/^#\/espaco\/([0-9a-f-]{36})$/);
   if (m) return telaEspaco(m[1]);
+  const mp = location.hash.match(/^#\/projeto\/([0-9a-f-]{36})$/);
+  if (mp) return telaProjeto(mp[1]);
   return telaInicio();
 }
 

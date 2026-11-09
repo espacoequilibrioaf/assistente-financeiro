@@ -153,3 +153,11 @@ table.tabela th:first-child, table.tabela td:first-child { text-align: left; }
 .kpi-valor { font-size: 0.9rem; }
 .grade2 .linha { flex-direction: column; align-items: flex-start; gap: 0; }
 .grade2 .linha strong { font-size: 0.95rem; }
+
+svg.grafico .ano { font-weight: 600; fill: var(--texto); }
+svg.grafico .divisa-ano { stroke: var(--borda); stroke-dasharray: 3 3; }
+.grade-valor { display: grid; grid-template-columns: 1fr 120px; gap: 10px; }
+.trilho.fundo { background: transparent; }
+
+.grade-valor > * { min-width: 0; }
+.grade-valor select { width: 100%; }

@@ -1,5 +1,5 @@
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' https://esm.sh; connect-src 'self' https://baulxxcbtvcsxgrgkifm.supabase.co wss://baulxxcbtvcsxgrgkifm.supabase.co https://esm.sh; img-src 'self' data:; style-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://esm.sh; connect-src 'self' https://baulxxcbtvcsxgrgkifm.supabase.co wss://baulxxcbtvcsxgrgkifm.supabase.co https://esm.sh https://api.frankfurter.dev https://api.frankfurter.app; img-src 'self' data:; style-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
   Permissions-Policy: camera=(), microphone=(), geolocation=()
