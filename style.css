@@ -74,3 +74,36 @@ button.link { background: none; color: var(--cor); padding: 8px 0; font-weight: 
 }
 ul.lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 ul.passos { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; color: var(--discreto); }
+
+/* ---- fase 1 (parte 1): espaços, lançamentos e contas ---- */
+.escondido { display: none !important; }
+a { color: var(--cor); }
+a.link { text-decoration: none; font-weight: 500; }
+a.clicavel { color: inherit; text-decoration: none; }
+a.clicavel:active { border-color: var(--cor); }
+select {
+  font: inherit; font-weight: 400; padding: 13px 14px; border-radius: 12px;
+  border: 1px solid var(--borda); background: var(--cartao); color: var(--texto);
+}
+.grade2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grade2 .cartao { padding: 12px; font-size: 0.92rem; }
+.positivo { color: var(--destaque); }
+.negativo { color: var(--erro); }
+.aviso {
+  background: color-mix(in srgb, var(--ouro) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ouro) 55%, transparent);
+  border-radius: 12px; padding: 10px 14px; font-size: 0.95rem;
+}
+.etiqueta.ouro { background: color-mix(in srgb, var(--ouro) 25%, transparent); color: var(--texto); }
+.abas { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: var(--fundo); padding: 4px; border-radius: 12px; }
+.aba { background: transparent; color: var(--discreto); padding: 10px; }
+.aba.ativa { background: var(--cor); color: var(--cor-texto-botao); }
+.acoes { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.confirmar { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
+.confirmar input { flex: 1 1 110px; padding: 10px 12px; }
+.confirmar select { flex: 1 1 120px; padding: 10px 12px; }
+button.pequeno { padding: 9px 14px; font-size: 0.92rem; }
+.mes { background: var(--cartao); border: 1px solid var(--borda); border-radius: var(--raio); padding: 6px; }
+.mes button { min-width: 44px; }
+label.marcar { flex-direction: row; align-items: center; gap: 10px; font-weight: 400; }
+label.marcar input { width: 22px; height: 22px; }
