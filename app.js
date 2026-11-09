@@ -1200,6 +1200,8 @@ async function telaProjeto(projetoId) {
     el('a', { class: 'link', href: ehEspacoViagem ? '#/' : `#/espaco/${espacoId}` }, ehEspacoViagem ? '‹ Seus espaços' : `‹ ${espR.data.nome}`),
     el('h1', {}, proj.nome),
     datas && el('p', { class: 'discreto' }, `${datas} · toque no dia para ver e lançar`),
+    (proj.moedas || []).some((m) => m !== 'BRL') && el('a', { class: 'botao-conversor', href: `/conversor.html?voltar=${encodeURIComponent(location.pathname + location.hash)}` },
+      el('span', { 'aria-hidden': 'true' }, '💱'), el('span', {}, el('strong', {}, 'Quanto custa isso?'), el('span', { class: 'pequeno-texto' }, 'Converter moeda · funciona sem internet'))),
     roteiroDiaADia(lancs, (l) => itemLancamento(l, { nomeCat, nomeConta, contas: contasPagamento.map((c) => ({ ...c, nome: nomeConta[c.id] })), podeEditar, aoMudar: recarregar, nomePessoa, nomeRubrica, nomeLocal, compacto: true }), nomeLocal,
       podeEditar ? (d, localId, botao) => {
         data.value = d; if (localId) local.value = localId;
@@ -1207,7 +1209,6 @@ async function telaProjeto(projetoId) {
       } : null, proj.data_inicio, proj.data_fim),
     podeEditar && el('button', { class: 'secundario', onclick: (e) => { form.classList.toggle('escondido'); e.currentTarget.after(form); valor.focus(); } }, '+ Gasto em outra data'),
     podeEditar && form,
-    conversorRapido(proj.moedas || []),
     el('h2', {}, 'Painel da viagem'),
     resumo,
     graficoEvolucao(despesas, proj.data_inicio, proj.data_fim),

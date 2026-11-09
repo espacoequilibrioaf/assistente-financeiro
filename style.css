@@ -199,3 +199,7 @@ li.item-compacto.pago .item-valor { color: var(--serie-saida); }
 .detalhe { padding: 0 0 12px 18px; }
 details.cartao > summary { cursor: pointer; font-weight: 600; color: var(--texto); }
 details.cartao[open] > summary { margin-bottom: 10px; }
+a.botao-conversor { display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 14px; background: var(--cor); color: #fff; text-decoration: none; }
+a.botao-conversor > span:first-child { font-size: 1.8rem; line-height: 1; }
+a.botao-conversor > span:last-child { display: flex; flex-direction: column; gap: 2px; }
+a.botao-conversor .pequeno-texto { opacity: 0.85; }
