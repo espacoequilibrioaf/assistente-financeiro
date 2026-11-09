@@ -587,7 +587,7 @@ function formularioLancamento({ espacoId, contas, cats, podeEditar, ehDependente
   return el('div', { class: 'tela' }, abrir, form);
 }
 
-function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, nomePessoa = {}, nomeRubrica = {}, nomeLocal = {} }) {
+function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, nomePessoa = {}, nomeRubrica = {}, nomeLocal = {}, compacto = false }) {
   const ehTransf = l.tipo === 'transferencia';
   const ids = ehTransf && l.transferencia_par_id ? [l.id, l.transferencia_par_id] : [l.id];
   const sinal = ehTransf ? '' : (l.tipo === 'receita' ? 'positivo' : 'negativo');
@@ -642,6 +642,27 @@ function itemLancamento(l, { nomeCat, nomeConta, contas, podeEditar, aoMudar, no
     } }, 'Zerar (remover)'));
   }
 
+  if (compacto) {
+    const detalhes = [
+      el('p', { class: 'discreto' }, [nomeRubrica[l.rubrica_id], nomeLocal[l.local_id]].filter(Boolean).join(' · ')),
+      l.moeda && l.moeda !== 'BRL' && l.valor_original ? el('p', { class: 'discreto' }, `${numero(l.valor_original)} ${l.moeda} · cotação R$ ${numero(l.cotacao, 4)}`) : null,
+      l.favorecido && l.status !== 'confirmado' ? el('p', { class: 'discreto' }, `A pagar para ${l.favorecido}`) : null,
+      l.status === 'confirmado' && l.pago_por && nomePessoa[l.pago_por] ? el('p', { class: 'discreto' }, `Pago por ${nomePessoa[l.pago_por]}${l.conta_id && nomeConta[l.conta_id] ? ` · ${nomeConta[l.conta_id]}` : ''}`) : null,
+      l.observacao ? el('p', { class: 'observacao' }, l.observacao) : null,
+      diferenca,
+    ].filter(Boolean);
+    const painelC = el('div', { class: 'tela escondido detalhe' }, detalhes, acoes, erro);
+    const SIT = { pago: 'pago', reservado: 'reservado', a_confirmar: 'a confirmar' };
+    const marcaStatus = l.status === 'confirmado' ? el('span', { class: 'ponto ok', title: 'Já pago' }, '✓')
+      : el('span', { class: 'ponto', title: 'Previsto' }, '○');
+    return el('li', { class: `item-compacto ${l.status === 'confirmado' ? 'pago' : ''}` },
+      el('button', { type: 'button', class: 'linha item-linha', onclick: () => painelC.classList.toggle('escondido') },
+        el('span', { class: 'item-nome' }, marcaStatus, ' ', l.descricao || nomeRubrica[l.rubrica_id] || 'Gasto',
+          l.situacao && SIT[l.situacao] && l.status !== 'confirmado' ? el('span', { class: 'etiqueta mini' }, SIT[l.situacao]) : null),
+        el('span', { class: 'item-valor' }, reais(l.valor_centavos))),
+      painelC,
+    );
+  }
   const painel = el('div', { class: 'tela escondido' }, acoes);
   return el('li', { class: 'cartao' },
     el('div', { class: 'linha' },
@@ -814,22 +835,35 @@ function graficoEvolucao(despesas, inicio, fim) {
   );
 }
 
-function roteiroDiaADia(lancs, item, nomeLocal) {
+function roteiroDiaADia(lancs, item, nomeLocal, aoLancarNoDia, inicio, fim) {
   const dias = {};
   for (const l of lancs) (dias[l.data] = dias[l.data] || []).push(l);
+  // inclui os dias da viagem que ainda não têm nada lançado
+  if (inicio && fim) for (let t = Date.parse(`${inicio}T12:00:00`); t <= Date.parse(`${fim}T12:00:00`); t += 864e5) {
+    const d = new Date(t).toISOString().slice(0, 10); dias[d] = dias[d] || [];
+  }
   const hoje = hojeISO();
-  return el('div', { class: 'tela' }, Object.keys(dias).sort().map((d) => {
-    const ls = dias[d];
-    const total = ls.filter((l) => l.tipo === 'despesa').reduce((a, l) => a + l.valor_centavos, 0);
-    const pago = ls.filter((l) => l.tipo === 'despesa' && l.status === 'confirmado').reduce((a, l) => a + l.valor_centavos, 0);
+  const futuros = Object.keys(dias).sort().filter((d) => d >= hoje);
+  const abrir = futuros.includes(hoje) ? hoje : null;
+  return el('div', { class: 'roteiro' }, Object.keys(dias).sort().map((d) => {
+    const ls = dias[d].filter((l) => l.tipo === 'despesa');
+    const planejado = ls.reduce((a, l) => a + (l.valor_previsto_centavos || l.valor_centavos), 0);
+    const gasto = ls.filter((l) => l.status === 'confirmado').reduce((a, l) => a + l.valor_centavos, 0);
     const locais = [...new Set(ls.map((l) => nomeLocal[l.local_id]).filter(Boolean))].join(' · ');
     const semana = new Date(`${d}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '');
-    return el('details', { class: 'dia', open: d === hoje },
+    const passou = d < hoje;
+    const det = el('details', { class: `dia ${passou ? 'passado' : ''} ${d === hoje ? 'hoje' : ''}`, open: d === abrir },
       el('summary', {},
-        el('span', { class: 'dia-titulo' }, `${semana} ${dataCurta(d)}`, locais && el('span', { class: 'discreto' }, ` · ${locais}`)),
-        el('span', { class: 'dia-total' }, reais(total), pago && pago < total ? el('span', { class: 'discreto pequeno-texto' }, ` (pago ${reais(pago)})`) : null)),
-      el('ul', { class: 'lista' }, ls.map(item)),
+        el('div', { class: 'dia-cab' },
+          el('strong', {}, `${semana} ${dataCurta(d)}`),
+          locais ? el('span', { class: 'discreto' }, locais) : null),
+        el('div', { class: 'dia-valores' },
+          el('span', {}, el('span', { class: 'discreto' }, 'Planejado '), el('strong', {}, reais(planejado))),
+          el('span', {}, el('span', { class: 'discreto' }, 'Gasto '), el('strong', { class: gasto > planejado ? 'negativo' : '' }, reais(gasto))))),
+      ls.length ? el('ul', { class: 'itens-dia' }, ls.map(item)) : el('p', { class: 'discreto' }, 'Nada planejado.'),
+      aoLancarNoDia ? el('button', { type: 'button', class: 'secundario pequeno', onclick: (e) => aoLancarNoDia(d, ls.find((l) => l.local_id)?.local_id, e.currentTarget) }, '+ Lançar gasto deste dia') : null,
     );
+    return det;
   }));
 }
 
@@ -1168,16 +1202,18 @@ async function telaProjeto(projetoId) {
   mostrar(el('section', { class: 'tela' },
     marca(),
     el('a', { class: 'link', href: ehEspacoViagem ? '#/' : `#/espaco/${espacoId}` }, ehEspacoViagem ? '‹ Seus espaços' : `‹ ${espR.data.nome}`),
-    el('div', { class: 'linha' }, el('h1', {}, proj.nome), datas && el('span', { class: 'etiqueta' }, datas)),
-    resumo,
-    el('h2', {}, 'Roteiro dia a dia'),
-    el('p', { class: 'discreto pequeno-texto' }, 'Toque num dia para ver os gastos. Em cada gasto, “Ajustar” permite mudar a previsão, confirmar o valor pago ou zerar.'),
-    lancs.length ? roteiroDiaADia(lancs, (l) => itemLancamento(l, { nomeCat, nomeConta, contas: contasPagamento.map((c) => ({ ...c, nome: nomeConta[c.id] })), podeEditar, aoMudar: recarregar, nomePessoa, nomeRubrica, nomeLocal }), nomeLocal)
-      : el('p', { class: 'discreto' }, 'Nenhum gasto ainda.'),
-    podeEditar && el('button', { onclick: () => { form.classList.toggle('escondido'); valor.focus(); } }, '+ Gasto da viagem'),
+    el('h1', {}, proj.nome),
+    datas && el('p', { class: 'discreto' }, `${datas} · toque no dia para ver e lançar`),
+    roteiroDiaADia(lancs, (l) => itemLancamento(l, { nomeCat, nomeConta, contas: contasPagamento.map((c) => ({ ...c, nome: nomeConta[c.id] })), podeEditar, aoMudar: recarregar, nomePessoa, nomeRubrica, nomeLocal, compacto: true }), nomeLocal,
+      podeEditar ? (d, localId, botao) => {
+        data.value = d; if (localId) local.value = localId;
+        form.classList.remove('escondido'); botao.after(form); valor.focus();
+      } : null, proj.data_inicio, proj.data_fim),
+    podeEditar && el('button', { class: 'secundario', onclick: (e) => { form.classList.toggle('escondido'); e.currentTarget.after(form); valor.focus(); } }, '+ Gasto em outra data'),
     podeEditar && form,
     conversorRapido(proj.moedas || []),
     el('h2', {}, 'Painel da viagem'),
+    resumo,
     graficoEvolucao(despesas, proj.data_inicio, proj.data_fim),
     blocoRubricas,
     blocoLocais,
