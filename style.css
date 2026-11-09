@@ -1,11 +1,13 @@
 :root {
-  --cor: #0f766e;
-  --cor-escura: #115e59;
-  --fundo: #f6f7f5;
+  --cor: #26366d;          /* azul-marinho da doPontoAparaB */
+  --cor-texto-botao: #ffffff;
+  --destaque: #1027c4;     /* azul royal da doPontoAparaB */
+  --ouro: #f2b705;
+  --fundo: #f5f6fa;
   --cartao: #ffffff;
-  --texto: #1c1f1e;
-  --discreto: #5f6b68;
-  --borda: #dfe4e2;
+  --texto: #141414;
+  --discreto: #5b6275;
+  --borda: #dde1ec;
   --erro: #b42318;
   --raio: 14px;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -15,13 +17,14 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --fundo: #111514;
-    --cartao: #1a201f;
-    --texto: #eef2f1;
-    --discreto: #9aa7a4;
-    --borda: #2c3533;
-    --cor: #2dd4bf;
-    --cor-escura: #14b8a6;
+    --fundo: #0e1220;
+    --cartao: #171d30;
+    --texto: #eef0f6;
+    --discreto: #a3aac0;
+    --borda: #2a3250;
+    --cor: #a9b8f2;
+    --cor-texto-botao: #0e1530;
+    --destaque: #a9b8f2;
     --erro: #f97066;
   }
 }
@@ -38,7 +41,9 @@ h2 { font-size: 1.05rem; margin: 8px 0 0; }
 p { margin: 0; line-height: 1.45; }
 .discreto { color: var(--discreto); font-size: 0.95rem; }
 .erro { color: var(--erro); font-size: 0.95rem; }
-.marca { color: var(--cor); font-weight: 700; letter-spacing: 0.02em; }
+.marca { display: flex; align-items: center; gap: 10px; color: var(--cor); font-weight: 700; letter-spacing: 0.02em; }
+.boneco { width: 56px; height: auto; }
+@media (prefers-color-scheme: dark) { .boneco { filter: invert(1); } }
 
 label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
 input {
@@ -52,7 +57,7 @@ input.codigo { font-size: 1.5rem; letter-spacing: 0.4em; text-align: center; }
 button {
   font: inherit; font-weight: 600;
   padding: 14px 16px; border-radius: 12px; border: 0;
-  background: var(--cor); color: #fff; cursor: pointer;
+  background: var(--cor); color: var(--cor-texto-botao); cursor: pointer;
 }
 button:disabled { opacity: 0.6; cursor: default; }
 button.secundario { background: transparent; color: var(--cor); border: 1px solid var(--borda); }

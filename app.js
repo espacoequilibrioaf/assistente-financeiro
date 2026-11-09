@@ -42,6 +42,10 @@ function mensagemErro(erro) {
 const NOMES_TIPO = { pessoal: 'Pessoal', familia: 'Família', empresa: 'Empresa' };
 const NOMES_PAPEL = { dono: 'dono', editor: 'pode editar', leitor: 'só leitura', dependente: 'dependente' };
 
+function marca() {
+  return el('p', { class: 'marca' }, el('img', { class: 'boneco', src: '/icons/boneco.png', alt: '' }), 'Assistente Financeiro');
+}
+
 // ---------- telas ----------
 function telaEmail(erro = '') {
   const input = el('input', { type: 'email', name: 'email', autocomplete: 'email', inputmode: 'email', required: true, placeholder: 'voce@exemplo.com' });
@@ -58,7 +62,7 @@ function telaEmail(erro = '') {
     if (error) return telaEmail(mensagemErro(error));
     telaCodigo(email);
   } },
-    el('p', { class: 'marca' }, 'Assistente Financeiro'),
+    marca(),
     el('h1', {}, 'Entrar'),
     el('p', { class: 'discreto' }, 'Digite seu e-mail. Vamos mandar um código para você entrar, sem senha.'),
     el('label', {}, 'E-mail', input),
@@ -131,7 +135,7 @@ function telaInicio(perfil, espacos) {
   const ehIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.matchMedia('(display-mode: standalone)').matches;
 
   mostrar(el('section', { class: 'tela' },
-    el('p', { class: 'marca' }, 'Assistente Financeiro'),
+    marca(),
     el('h1', {}, `Olá, ${perfil.nome}!`),
     el('h2', {}, 'Seus espaços'),
     lista,
