@@ -1,7 +1,7 @@
 // Service worker: guarda a "casca" do app para abrir rápido e funcionar como app instalado.
 // Dados financeiros NUNCA são guardados aqui; sempre vêm do Supabase.
-const VERSAO = 'casca-v14';
-const CASCA = ['/', '/index.html', '/style.css', '/app.js', '/config.js', '/conversor.html', '/conversor.js', '/cotacoes.js', '/manifest.webmanifest', '/icons/boneco.png', '/icons/apple-touch-icon.png', '/icons/icon-192.png', '/icons/icon-512.png'];
+const VERSAO = 'casca-v15';
+const CASCA = ['/', '/index.html', '/style.css', '/app.js', '/config.js', '/conversor.html', '/conversor.js', '/cotacoes.js', '/extrato.js', '/manifest.webmanifest', '/icons/boneco.png', '/icons/apple-touch-icon.png', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSAO).then((c) => c.addAll(CASCA)).then(() => self.skipWaiting()));

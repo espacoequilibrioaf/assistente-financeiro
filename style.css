@@ -203,3 +203,7 @@ a.botao-conversor { display: flex; align-items: center; gap: 14px; padding: 14px
 a.botao-conversor > span:first-child { font-size: 1.8rem; line-height: 1; }
 a.botao-conversor > span:last-child { display: flex; flex-direction: column; gap: 2px; }
 a.botao-conversor .pequeno-texto { opacity: 0.85; }
+
+a.botao-extrato { display: block; text-align: center; padding: 12px; border-radius: 12px; border: 1px dashed var(--cor); color: var(--cor); text-decoration: none; font-weight: 600; }
+input.arquivo { padding: 10px; }
+li.cartao.passado { opacity: 0.7; }

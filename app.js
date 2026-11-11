@@ -2,6 +2,7 @@
 // Telas: login por código, início (espaços), espaço (resumo do mês, lançamentos, contas, membros).
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { MOEDAS_CONV, atualizarCotacoes, cotacaoDe } from '/cotacoes.js';
+import { decodificarArquivo, lerOfx, conferir, contasFixas, chaveDescricao } from '/extrato.js';
 import { CONFIG } from './config.js';
 
 const supabase = createClient(CONFIG.supabaseUrl, CONFIG.supabaseKey, {
@@ -361,10 +362,166 @@ async function telaEspaco(espacoId) {
   mostrar(el('section', { class: 'tela' },
     marca(), cabecalho, painel.topo, navMes, resumo, pendencias, painel.categorias,
     (podeEditar || ehDependente) && formLanc,
+    podeEditar && contas.length ? el('a', { class: 'botao-extrato', href: `#/extrato/${espacoId}` }, '📄 Anexar extrato do banco') : null,
     el('h2', {}, 'Lançamentos do mês'), lista,
     painel.meses,
     blocoProjetos(espacoId, projR.data, podeEditar),
     blocoContas, blocoMembros,
+  ));
+}
+
+// ---------- extrato do banco (OFX): conferência e contas fixas ----------
+async function telaExtrato(espacoId) {
+  const [espR, contasR] = await Promise.all([
+    supabase.from('espacos').select('id, nome').eq('id', espacoId).single(),
+    supabase.from('contas').select('id, nome, criado_em').eq('espaco_id', espacoId).eq('ativa', true).order('nome'),
+  ]);
+  if (espR.error || contasR.error) return telaErro(mensagemErro(espR.error || contasR.error));
+  let cats;
+  try { cats = await carregarCategorias(espacoId); } catch (e) { return telaErro(mensagemErro(e)); }
+  const voltar = `#/espaco/${espacoId}`;
+  const conta = el('select', {}, contasR.data.map((c) => el('option', { value: c.id }, c.nome)));
+  const arquivo = el('input', { type: 'file', class: 'arquivo' });
+  const erro = el('p', { class: 'erro', role: 'alert' });
+  const resultado = el('div', { class: 'tela' });
+
+  arquivo.addEventListener('change', async () => {
+    erro.textContent = ''; resultado.replaceChildren();
+    const f = arquivo.files[0]; if (!f) return;
+    let extrato;
+    try { extrato = lerOfx(decodificarArquivo(await f.arrayBuffer())); } catch (e) { erro.textContent = e.message; return; }
+    resultado.replaceChildren(el('p', { class: 'discreto' }, 'Comparando com o que já foi lançado…'));
+    const ini = new Date(Date.parse(`${extrato.inicio}T12:00:00`) - 15 * 864e5).toISOString().slice(0, 10);
+    const fimMais = new Date(Date.parse(`${extrato.fim}T12:00:00`) + 15 * 864e5).toISOString().slice(0, 10);
+    const campos = 'id, tipo, status, descricao, valor_centavos, valor_previsto_centavos, data, conta_id, impressao_digital, transferencia_sentido';
+    const [lR, fR] = await Promise.all([
+      supabase.from('lancamentos').select(campos).eq('espaco_id', espacoId).neq('status', 'cancelado').gte('data', ini).lte('data', fimMais),
+      supabase.from('lancamentos').select('descricao').eq('espaco_id', espacoId).eq('status', 'previsto').gte('data', hojeISO()),
+    ]);
+    if (lR.error || fR.error) { resultado.replaceChildren(); erro.textContent = mensagemErro(lR.error || fR.error); return; }
+    montarConferencia(extrato, conferir(extrato, lR.data, conta.value), contasFixas(extrato),
+      new Set(fR.data.map((l) => chaveDescricao(l.descricao))));
+  });
+
+  function montarConferencia(extrato, { itens, semExtrato }, fixas, jaPrevistas) {
+    const por = (sit) => itens.filter((i) => i.situacao === sit);
+    const previsoes = por('previsao'); const novos = por('novo');
+    const batidos = [...por('bateu'), ...por('ja_importado')];
+    const opcoesCat = (tipo) => [el('option', { value: '' }, 'Sem categoria'), ...cats.filter((c) => c.tipo === tipo).map((c) => el('option', { value: c.id }, c.rotulo))];
+    const sinalValor = (v) => el('strong', { class: v < 0 ? 'negativo' : 'positivo' }, reais(Math.abs(v)));
+
+    const marcPrev = previsoes.map((i) => ({ i, cb: el('input', { type: 'checkbox', checked: true }) }));
+    // movimentos de antes da conta existir no app já estão no saldo inicial: vêm desmarcados
+    const inicioConta = (contasR.data.find((c) => c.id === conta.value)?.criado_em || '').slice(0, 10);
+    const antigo = (i) => inicioConta && i.mov.data < inicioConta;
+    const marcNovo = novos.map((i) => ({ i, antigo: antigo(i), cb: el('input', { type: 'checkbox', checked: !antigo(i) }),
+      cat: el('select', { 'aria-label': 'Categoria' }, opcoesCat(i.mov.valor < 0 ? 'despesa' : 'receita')) }));
+    const marcFixa = fixas.map((f) => {
+      const existe = jaPrevistas.has(f.chave);
+      return { f, existe, cb: el('input', { type: 'checkbox', checked: !existe }),
+        nome: el('input', { value: f.descricao, maxlength: '120', 'aria-label': 'Descrição' }),
+        valor: el('input', { value: numero(f.media / 100), inputmode: 'decimal', 'aria-label': 'Valor por mês' }),
+        dia: el('input', { value: String(f.dia), inputmode: 'numeric', maxlength: '2', 'aria-label': 'Dia do vencimento' }) };
+    });
+    const proximo = somarMes(mesAtual(), 1);
+    const desde = el('select', { 'aria-label': 'A partir de' }, [mesAtual(), proximo, somarMes(proximo, 1)].map((m) => el('option', { value: m, selected: m === proximo }, nomeMes(m))));
+    const quantos = el('select', { 'aria-label': 'Por quantos meses' }, [3, 6, 12, 14].map((n) => el('option', { value: n, selected: n === 12 }, `${n} meses`)));
+    const botao = el('button', {}, 'Salvar o que está marcado');
+    const erroS = el('p', { class: 'erro', role: 'alert' });
+
+    botao.addEventListener('click', async () => {
+      erroS.textContent = ''; botao.disabled = true; botao.textContent = 'Salvando…';
+      const contaId = conta.value; let feitos = 0;
+      try {
+        // 1) previsões que aconteceram: viram realizado com o valor do extrato
+        for (const { i, cb } of marcPrev) {
+          if (!cb.checked) continue;
+          const { error } = await supabase.from('lancamentos').update({ status: 'confirmado', valor_centavos: Math.abs(i.mov.valor), data: i.mov.data, conta_id: contaId, impressao_digital: i.mov.chave }).eq('id', i.lanc.id);
+          if (error) throw error; feitos++;
+        }
+        // 2) o que já batia ganha a "identidade" do extrato, para não ser conferido de novo
+        for (const i of batidos) if (i.situacao === 'bateu') {
+          await supabase.from('lancamentos').update({ impressao_digital: i.mov.chave }).eq('id', i.lanc.id);
+        }
+        // 3) movimentos que faltavam
+        const novosSel = marcNovo.filter((m) => m.cb.checked).map(({ i, cat }) => ({
+          espaco_id: espacoId, tipo: i.mov.valor < 0 ? 'despesa' : 'receita', status: 'confirmado', descricao: i.mov.descricao,
+          valor_centavos: Math.abs(i.mov.valor), data: i.mov.data, data_competencia: competencia(i.mov.data),
+          categoria_id: cat.value || null, conta_id: contaId, origem: 'importacao', impressao_digital: i.mov.chave,
+        }));
+        if (novosSel.length) { const { error } = await supabase.from('lancamentos').insert(novosSel); if (error) throw error; feitos += novosSel.length; }
+        // 4) contas fixas viram previsões dos próximos meses
+        const prevs = [];
+        for (const m of marcFixa) {
+          if (!m.cb.checked) continue;
+          const v = lerValor(m.valor.value); const d = Math.min(28, Math.max(1, Number(m.dia.value) || 10));
+          if (!v) throw new Error(`Confira o valor de “${m.nome.value}”.`);
+          for (let k = 0; k < Number(quantos.value); k++) {
+            const mes = somarMes(desde.value, k);
+            const dataM = `${mes}-${String(d).padStart(2, '0')}`;
+            prevs.push({ espaco_id: espacoId, tipo: 'despesa', status: 'previsto', descricao: m.nome.value.trim() || m.f.descricao,
+              valor_centavos: v, valor_previsto_centavos: v, data: dataM, data_competencia: `${mes}-01`, conta_id: contaId, origem: 'importacao' });
+          }
+        }
+        if (prevs.length) { const { error } = await supabase.from('lancamentos').insert(prevs); if (error) throw error; feitos += prevs.length; }
+      } catch (e) {
+        botao.disabled = false; botao.textContent = 'Tentar salvar de novo';
+        erroS.textContent = `${mensagemErro(e)}${feitos ? ` (${feitos} itens já foram salvos antes do erro; ao tentar de novo, anexe o extrato outra vez para conferir.)` : ''}`;
+        return;
+      }
+      resultado.replaceChildren(el('div', { class: 'cartao tela' },
+        el('strong', {}, '✓ Pronto!'),
+        el('p', {}, `${feitos} ${feitos === 1 ? 'item salvo' : 'itens salvos'}. Se anexar este extrato de novo, nada entra em dobro.`),
+        el('a', { class: 'botao-extrato', href: voltar }, 'Ver o espaço')));
+    });
+
+    const secao = (titulo, explicacao, filhos) => filhos.length ? el('div', { class: 'tela' }, el('h2', {}, titulo), el('p', { class: 'discreto pequeno-texto' }, explicacao), el('ul', { class: 'lista' }, filhos)) : null;
+    resultado.replaceChildren(...[
+      el('p', { class: 'aviso' }, `Extrato de ${dataCurta(extrato.inicio)} a ${dataCurta(extrato.fim)}: ${extrato.movimentos.length} movimentos. `
+        + `${batidos.length} já conferem, ${previsoes.length} previsões aconteceram, ${novos.length} não estavam lançados.`),
+      secao('Previsões que aconteceram', 'Marcadas viram “realizado” com o valor real do extrato.', marcPrev.map(({ i, cb }) => el('li', { class: 'cartao' },
+        el('label', { class: 'marcar' }, cb, el('span', { class: 'item-nome' }, `${i.lanc.descricao || 'Previsão'} · ${dataCurta(i.mov.data)}`)),
+        el('div', { class: 'linha pequeno-texto' }, el('span', { class: 'discreto' }, `previsto ${reais(i.lanc.valor_centavos)} → real`), sinalValor(i.mov.valor)),
+        el('p', { class: 'discreto pequeno-texto' }, `No extrato: ${i.mov.descricao}`)))),
+      secao('No extrato, mas não lançados', `Marcados entram como realizados nesta conta. A categoria é opcional.${marcNovo.some((m) => m.antigo) ? ` Os de antes de ${dataCurta(inicioConta)} vêm desmarcados: o saldo inicial da conta já inclui esses gastos, e lançá-los mudaria o saldo.` : ''}`, [
+        marcNovo.length > 3 ? el('li', { class: 'linha' }, el('button', { type: 'button', class: 'secundario pequeno', onclick: () => marcNovo.forEach((m) => { m.cb.checked = true; }) }, 'Marcar todos'),
+          el('button', { type: 'button', class: 'secundario pequeno', onclick: () => marcNovo.forEach((m) => { m.cb.checked = false; }) }, 'Desmarcar todos')) : null,
+        ...marcNovo.map(({ i, cb, cat, antigo: velho }) => el('li', { class: `cartao ${velho ? 'passado' : ''}` },
+        el('div', { class: 'linha' }, el('label', { class: 'marcar' }, cb, el('span', { class: 'item-nome' }, i.mov.descricao)), sinalValor(i.mov.valor)),
+        el('div', { class: 'linha pequeno-texto' }, el('span', { class: 'discreto' }, dataCurta(i.mov.data)), cat)))].filter(Boolean)),
+      semExtrato.length ? el('div', { class: 'tela' }, el('h2', {}, 'Lançados como pagos, mas fora do extrato'),
+        el('p', { class: 'discreto pequeno-texto' }, 'Vale conferir: talvez tenham sido pagos por outra conta, ou com outro valor.'),
+        el('ul', { class: 'lista' }, semExtrato.map((l) => el('li', { class: 'cartao linha' }, el('span', {}, `${dataCurta(l.data)} · ${l.descricao || 'Sem descrição'}`), el('strong', {}, reais(l.valor_centavos)))))) : null,
+      batidos.length ? el('details', { class: 'cartao' }, el('summary', {}, `✓ ${batidos.length} movimentos já estavam certinhos`),
+        el('ul', { class: 'lista' }, batidos.map((i) => el('li', { class: 'linha pequeno-texto' }, el('span', {}, `${dataCurta(i.mov.data)} · ${i.mov.descricao}`), sinalValor(i.mov.valor))))) : null,
+      marcFixa.length ? el('div', { class: 'tela' }, el('h2', {}, 'Contas fixas → previsões'),
+        el('p', { class: 'discreto pequeno-texto' }, 'Gastos que se repetiram em mais de um mês, com a média. Marque os que devem virar previsão; dá para ajustar nome, valor e dia.'),
+        el('div', { class: 'grade2' }, el('label', {}, 'A partir de', desde), el('label', {}, 'Por', quantos)),
+        el('ul', { class: 'lista' }, marcFixa.map((m) => el('li', { class: 'cartao tela' },
+          el('label', { class: 'marcar' }, m.cb, el('span', { class: 'discreto pequeno-texto' }, `apareceu em ${m.f.meses} de ${m.f.totalMeses} meses${m.existe ? ' · já existe previsão parecida' : ''}`)),
+          m.nome,
+          el('div', { class: 'grade2' }, el('label', {}, 'Média por mês (R$)', m.valor), el('label', {}, 'Dia', m.dia)))))) : null,
+      (marcPrev.length || marcNovo.length || marcFixa.length) ? el('div', { class: 'tela' }, erroS, botao)
+        : el('p', { class: 'discreto' }, 'Nada para fazer: tudo deste extrato já está lançado.'),
+    ].filter(Boolean));
+  }
+
+  mostrar(el('section', { class: 'tela' },
+    marca(),
+    el('a', { class: 'link', href: voltar }, `‹ ${espR.data.nome}`),
+    el('h1', {}, 'Anexar extrato'),
+    el('p', { class: 'discreto' }, 'O app compara o extrato com o que já foi lançado e encontra as contas que se repetem. Nada é salvo antes de você conferir.'),
+    el('details', { class: 'cartao' }, el('summary', {}, 'Como baixar o extrato do Itaú'),
+      el('ol', { class: 'pequeno-texto' },
+        el('li', {}, 'No computador, entre no site do Itaú (itau.com.br) com sua conta.'),
+        el('li', {}, 'Vá em Conta corrente › Extrato e escolha o período (os últimos 3 meses são o ideal).'),
+        el('li', {}, 'Procure “Salvar em outros formatos” e escolha OFX (ou “Money”).'),
+        el('li', {}, 'Mande o arquivo para o celular (por e-mail ou WhatsApp) e anexe aqui, ou anexe direto pelo computador.'))),
+    el('div', { class: 'cartao tela' },
+      el('label', {}, 'Conta deste extrato', conta),
+      el('label', {}, 'Arquivo do extrato (.ofx)', arquivo),
+      erro),
+    resultado,
   ));
 }
 
@@ -1244,6 +1401,8 @@ async function rotear() {
   if (!usuario.nome) return telaNome();
   const m = location.hash.match(/^#\/espaco\/([0-9a-f-]{36})$/);
   if (m) return telaEspaco(m[1]);
+  const me = location.hash.match(/^#\/extrato\/([0-9a-f-]{36})$/);
+  if (me) return telaExtrato(me[1]);
   const mp = location.hash.match(/^#\/projeto\/([0-9a-f-]{36})$/);
   if (mp) return telaProjeto(mp[1]);
   return telaInicio();
